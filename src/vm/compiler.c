@@ -1,13 +1,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
+#include "../optionals/optionals.h"
+#include "ast_event.h"
 #include "common.h"
 #include "compiler.h"
+#include "error_lib/error.h"
 #include "memory.h"
 #include "vm.h"
-#include "error_lib/error.h"
-#include "../optionals/optionals.h"
 
 #ifdef DEBUG_PRINT_CODE
 
@@ -20,22 +22,30 @@ static Chunk *currentChunk(Compiler *compiler) {
 }
 
 static void errorAt(Parser *parser, LangToken *token, const char *message) {
-    if (parser->panicMode) return;
+    if (parser->panicMode)
+        return;
     parser->panicMode = true;
 
-    log_error("File '%s', {bold}line %d{reset}", parser->module->name->chars, token->line);
+    if (parser->externalReportErrorFunc) {
+        ((externalErrorAt *)parser->externalReportErrorFunc)(
+            parser, token, message, parser->externalUserData);
+        return;
+    }
+
+    log_error("File '%s', {bold}line %d{reset}", parser->module->name->chars,
+              token->line);
 
     switch (token->type) {
-        case TOKEN_EOF:
-            log_padln("Error at end: %s", message);
-            break;
-        case TOKEN_ERROR:
-            log_padln("Error: %s", message);
-            break;
-        default:
-            log_padln("%zu %s %.*s", token->line, "|", token->length, token->start);
-            log_padln("%s", message);
-            break;
+    case TOKEN_EOF:
+        log_padln("Error at end: %s", message);
+        break;
+    case TOKEN_ERROR:
+        log_padln("Error: %s", message);
+        break;
+    default:
+        log_padln("%zu %s %.*s", token->line, "|", token->length, token->start);
+        log_padln("%s", message);
+        break;
     }
 
     fputc('\n', stderr);
@@ -55,19 +65,21 @@ static void advance(Parser *parser) {
 
     for (;;) {
         parser->current = scanToken(&parser->scanner);
-        if (parser->current.type != TOKEN_ERROR) break;
+        if (parser->current.type != TOKEN_ERROR)
+            break;
 
         errorAtCurrent(parser, parser->current.start);
     }
 }
 
-static void recede(Parser *parser){
+static void recede(Parser *parser) {
     for (int i = 0; i < parser->current.length; ++i) {
-            backTrack(&parser->scanner);
+        backTrack(&parser->scanner);
     }
 }
 
-static void consume(Compiler *compiler, LangTokenType type, const char *message) {
+static void consume(Compiler *compiler, LangTokenType type,
+                    const char *message) {
     if (compiler->parser->current.type == type) {
         advance(compiler->parser);
         return;
@@ -81,13 +93,21 @@ static bool check(Compiler *compiler, LangTokenType type) {
 }
 
 static bool match(Compiler *compiler, LangTokenType type) {
-    if (!check(compiler, type)) return false;
+    if (!check(compiler, type))
+        return false;
     advance(compiler->parser);
     return true;
 }
 
 static void emitByte(Compiler *compiler, uint8_t byte) {
-    writeChunk(compiler->parser->vm, currentChunk(compiler), byte, compiler->parser->previous.line);
+    writeChunk(compiler->parser->vm, currentChunk(compiler), byte,
+               compiler->parser->previous.line);
+}
+static void emitExternalAstEvent(Compiler *compiler, AstEventCode code,
+                                 void **values, int line) {
+    if (compiler->externalWriteBytesFunc)
+        ((externalCompilerWriteByteDef *)compiler->externalWriteBytesFunc)(
+            compiler, code, values, line, compiler->externalUserData);
 }
 
 static void emitBytes(Compiler *compiler, uint8_t byte1, uint8_t byte2) {
@@ -99,7 +119,8 @@ static void emitLoop(Compiler *compiler, int loopStart) {
     emitByte(compiler, OP_LOOP);
 
     int offset = currentChunk(compiler)->count - loopStart + 2;
-    if (offset > UINT16_MAX) error(compiler->parser, "Loop body too large.");
+    if (offset > UINT16_MAX)
+        error(compiler->parser, "Loop body too large.");
 
     emitByte(compiler, (offset >> 8) & 0xff);
     emitByte(compiler, offset & 0xff);
@@ -122,18 +143,20 @@ static void emitReturn(Compiler *compiler) {
     } else {
         emitByte(compiler, OP_NIL);
     }
-
+    emitExternalAstEvent(compiler, AST_RETURN, NULL,
+                         compiler->parser->current.line);
     emitByte(compiler, OP_RETURN);
 }
 
 static uint8_t makeConstant(Compiler *compiler, Value value) {
-    int constant = addConstant(compiler->parser->vm, currentChunk(compiler), value);
+    int constant =
+        addConstant(compiler->parser->vm, currentChunk(compiler), value);
     if (constant > UINT8_MAX) {
         error(compiler->parser, "Too many constants in one chunk.");
         return 0;
     }
 
-    return (uint8_t) constant;
+    return (uint8_t)constant;
 }
 
 static void emitConstant(Compiler *compiler, Value value) {
@@ -155,7 +178,8 @@ static void patchJump(Compiler *compiler, int offset) {
     currentChunk(compiler)->code[offset + 1] = jump & 0xff;
 }
 
-static void initCompiler(Parser *parser, Compiler *compiler, Compiler *parent, FunctionType type, AccessLevel level) {
+static void initCompiler(Parser *parser, Compiler *compiler, Compiler *parent,
+                         FunctionType type, AccessLevel level) {
     compiler->parser = parser;
     compiler->enclosing = parent;
     initTable(&compiler->stringConstants);
@@ -166,6 +190,12 @@ static void initCompiler(Parser *parser, Compiler *compiler, Compiler *parent, F
     compiler->classAnnotations = NULL;
     compiler->methodAnnotations = NULL;
     compiler->fieldAnnotations = NULL;
+    compiler->externalUserData = NULL;
+    compiler->externalWriteBytesFunc = NULL;
+    if(parent){
+            compiler->externalUserData = parent->externalUserData;
+    compiler->externalWriteBytesFunc = parent->externalWriteBytesFunc;
+    }
 
     if (parent != NULL) {
         compiler->class = parent->class;
@@ -180,30 +210,23 @@ static void initCompiler(Parser *parser, Compiler *compiler, Compiler *parent, F
     compiler->function = newFunction(parser->vm, parser->module, type, level);
 
     switch (type) {
-        case TYPE_INITIALIZER:
-        case TYPE_METHOD:
-        case TYPE_STATIC:
-        case TYPE_ABSTRACT:
-        case TYPE_FUNCTION: {
-            compiler->function->name = copyString(
-                    parser->vm,
-                    parser->previous.start,
-                    parser->previous.length
-            );
-            break;
-        }
-        case TYPE_ARROW_FUNCTION: {
-            compiler->function->name = copyString(
-                    parser->vm,
-                    "<anonymous>",
-                    11
-            );
-            break;
-        }
-        case TYPE_TOP_LEVEL: {
-            compiler->function->name = NULL;
-            break;
-        }
+    case TYPE_INITIALIZER:
+    case TYPE_METHOD:
+    case TYPE_STATIC:
+    case TYPE_ABSTRACT:
+    case TYPE_FUNCTION: {
+        compiler->function->name = copyString(
+            parser->vm, parser->previous.start, parser->previous.length);
+        break;
+    }
+    case TYPE_ARROW_FUNCTION: {
+        compiler->function->name = copyString(parser->vm, "<anonymous>", 11);
+        break;
+    }
+    case TYPE_TOP_LEVEL: {
+        compiler->function->name = NULL;
+        break;
+    }
     }
 
     Local *local = &compiler->locals[compiler->localCount++];
@@ -229,18 +252,21 @@ static ObjFunction *endCompiler(Compiler *compiler) {
     if (!compiler->parser->hadError) {
 
         disassembleChunk(currentChunk(compiler),
-                         function->name != NULL ? function->name->chars
-                                                : function->module->name->chars);
+                         function->name != NULL
+                             ? function->name->chars
+                             : function->module->name->chars);
     }
 #endif
     if (compiler->enclosing != NULL) {
         // Capture the upvalues in the new closure object.
-        emitBytes(compiler->enclosing, OP_CLOSURE, makeConstant(compiler->enclosing, OBJ_VAL(function)));
+        emitBytes(compiler->enclosing, OP_CLOSURE,
+                  makeConstant(compiler->enclosing, OBJ_VAL(function)));
 
         // Emit arguments for each upvalue to know whether to capture a local
         // or an upvalue.
         for (int i = 0; i < function->upvalueCount; i++) {
-            emitByte(compiler->enclosing, compiler->upvalues[i].isLocal ? 1 : 0);
+            emitByte(compiler->enclosing,
+                     compiler->upvalues[i].isLocal ? 1 : 0);
             emitByte(compiler->enclosing, compiler->upvalues[i].index);
         }
     }
@@ -251,15 +277,19 @@ static ObjFunction *endCompiler(Compiler *compiler) {
 }
 
 static void beginScope(Compiler *compiler) {
-    compiler->scopeDepth++;
-}
+        emitExternalAstEvent(compiler, AST_BLOCK, NULL,
+                         compiler->parser->current.line);
+ compiler->scopeDepth++;
+  }
 
 static void endScope(Compiler *compiler) {
     compiler->scopeDepth--;
+        emitExternalAstEvent(compiler, AST_BLOCK_END, NULL,
+                         compiler->parser->current.line);
 
     while (compiler->localCount > 0 &&
            compiler->locals[compiler->localCount - 1].depth >
-           compiler->scopeDepth) {
+               compiler->scopeDepth) {
 
         if (compiler->locals[compiler->localCount - 1].isUpvalue) {
             emitByte(compiler, OP_CLOSE_UPVALUE);
@@ -281,19 +311,23 @@ static ParseRule *getRule(LangTokenType type);
 static void parsePrecedence(Compiler *compiler, Precedence precedence);
 
 static uint8_t identifierConstant(Compiler *compiler, LangToken *name) {
-    ObjString *string = copyString(compiler->parser->vm, name->start, name->length);
+
+    ObjString *string =
+        copyString(compiler->parser->vm, name->start, name->length);
     Value indexValue;
     if (tableGet(&compiler->stringConstants, string, &indexValue)) {
-        return (uint8_t) AS_NUMBER(indexValue);
+        return (uint8_t)AS_NUMBER(indexValue);
     }
 
     uint8_t index = makeConstant(compiler, OBJ_VAL(string));
-    tableSet(compiler->parser->vm, &compiler->stringConstants, string, NUMBER_VAL((double) index));
+    tableSet(compiler->parser->vm, &compiler->stringConstants, string,
+             NUMBER_VAL((double)index));
     return index;
 }
 
 static bool identifiersEqual(LangToken *a, LangToken *b) {
-    if (a->length != b->length) return false;
+    if (a->length != b->length)
+        return false;
     return memcmp(a->start, b->start, a->length) == 0;
 }
 
@@ -304,7 +338,8 @@ static int resolveLocal(Compiler *compiler, LangToken *name, bool inFunction) {
         Local *local = &compiler->locals[i];
         if (identifiersEqual(name, &local->name)) {
             if (!inFunction && local->depth == -1) {
-                error(compiler->parser, "Cannot read local variable in its own initializer.");
+                error(compiler->parser,
+                      "Cannot read local variable in its own initializer.");
             }
             return i;
         }
@@ -316,7 +351,8 @@ static int resolveLocal(Compiler *compiler, LangToken *name, bool inFunction) {
 // Adds an upvalue to [compiler]'s function with the given properties.
 // Does not add one if an upvalue for that variable is already in the
 // list. Returns the index of the upvalue.
-static int addUpvalue(Compiler *compiler, uint8_t index, bool isLocal, bool constant) {
+static int addUpvalue(Compiler *compiler, uint8_t index, bool isLocal,
+                      bool constant) {
     // Look for an existing one.
     int upvalueCount = compiler->function->upvalueCount;
     for (int i = 0; i < upvalueCount; i++) {
@@ -348,7 +384,8 @@ static int addUpvalue(Compiler *compiler, uint8_t index, bool isLocal, bool cons
 // intermediate functions so that it gets walked down to this one.
 static int resolveUpvalue(Compiler *compiler, LangToken *name) {
     // If we are at the top level, we didn't find it.
-    if (compiler->enclosing == NULL) return -1;
+    if (compiler->enclosing == NULL)
+        return -1;
 
     // See if it's a local variable in the immediately enclosing function.
     int local = resolveLocal(compiler->enclosing, name, true);
@@ -356,7 +393,8 @@ static int resolveUpvalue(Compiler *compiler, LangToken *name) {
         // Mark the local as an upvalue so we know to close it when it goes
         // out of scope.
         compiler->enclosing->locals[local].isUpvalue = true;
-        return addUpvalue(compiler, (uint8_t) local, true, compiler->enclosing->locals[local].constant);
+        return addUpvalue(compiler, (uint8_t)local, true,
+                          compiler->enclosing->locals[local].constant);
     }
 
     // See if it's an upvalue in the immediately enclosing function. In
@@ -367,7 +405,8 @@ static int resolveUpvalue(Compiler *compiler, LangToken *name) {
     // deeply nested function that is closing over it.
     int upvalue = resolveUpvalue(compiler->enclosing, name);
     if (upvalue != -1) {
-        return addUpvalue(compiler, (uint8_t) upvalue, false, compiler->enclosing->upvalues[upvalue].constant);
+        return addUpvalue(compiler, (uint8_t)upvalue, false,
+                          compiler->enclosing->upvalues[upvalue].constant);
     }
 
     // If we got here, we walked all the way up the parent chain and
@@ -395,23 +434,27 @@ static void addLocal(Compiler *compiler, LangToken name) {
 // we're in a local scope.
 static void declareVariable(Compiler *compiler, LangToken *name) {
     // Global variables are implicitly declared.
-    if (compiler->scopeDepth == 0) return;
+    if (compiler->scopeDepth == 0)
+        return;
 
     // See if a local variable with this name is already declared in this
     // scope.
     // LangToken *name = &compiler->parser->previous;
     for (int i = compiler->localCount - 1; i >= 0; i--) {
         Local *local = &compiler->locals[i];
-        if (local->depth != -1 && local->depth < compiler->scopeDepth) break;
+        if (local->depth != -1 && local->depth < compiler->scopeDepth)
+            break;
         if (identifiersEqual(name, &local->name)) {
-            errorAt(compiler->parser, name, "Variable with this name already declared in this scope.");
+            errorAt(compiler->parser, name,
+                    "Variable with this name already declared in this scope.");
         }
     }
 
     addLocal(compiler, *name);
 }
 
-static uint8_t parseVariable(Compiler *compiler, const char *errorMessage, bool constant) {
+static uint8_t parseVariable(Compiler *compiler, const char *errorMessage,
+                             bool constant) {
     UNUSED(constant);
 
     consume(compiler, TOKEN_IDENTIFIER, errorMessage);
@@ -428,8 +471,10 @@ static uint8_t parseVariable(Compiler *compiler, const char *errorMessage, bool 
 static void defineVariable(Compiler *compiler, uint8_t global, bool constant) {
     if (compiler->scopeDepth == 0) {
         if (constant) {
-            tableSet(compiler->parser->vm, &compiler->parser->vm->constants,
-                     AS_STRING(currentChunk(compiler)->constants.values[global]), NIL_VAL);
+            tableSet(
+                compiler->parser->vm, &compiler->parser->vm->constants,
+                AS_STRING(currentChunk(compiler)->constants.values[global]),
+                NIL_VAL);
         }
 
         emitBytes(compiler, OP_DEFINE_MODULE, global);
@@ -446,7 +491,8 @@ static int argumentList(Compiler *compiler, bool *unpack) {
     if (!check(compiler, TOKEN_RIGHT_PAREN)) {
         do {
             if (*unpack) {
-                errorAtCurrent(compiler->parser, "Value unpacking must be the last argument.");
+                errorAtCurrent(compiler->parser,
+                               "Value unpacking must be the last argument.");
             }
 
             if (match(compiler, TOKEN_DOT_DOT_DOT)) {
@@ -494,12 +540,13 @@ static bool foldBinary(Compiler *compiler, LangTokenType operatorType) {
         Chunk *chunk = currentChunk(compiler);                                 \
         uint8_t index = chunk->code[chunk->count - 1];                         \
         uint8_t constant = chunk->code[chunk->count - 3];                      \
-        if (chunk->code[chunk->count - 2] != OP_CONSTANT) return false;        \
-        if (chunk->code[chunk->count - 4] != OP_CONSTANT) return false;        \
+        if (chunk->code[chunk->count - 2] != OP_CONSTANT)                      \
+            return false;                                                      \
+        if (chunk->code[chunk->count - 4] != OP_CONSTANT)                      \
+            return false;                                                      \
         chunk->constants.values[constant] = NUMBER_VAL(                        \
-            AS_NUMBER(chunk->constants.values[constant]) operator              \
-            AS_NUMBER(chunk->constants.values[index])                          \
-        );                                                                     \
+            AS_NUMBER(chunk->constants.values[constant]) operator AS_NUMBER(   \
+                chunk->constants.values[index]));                              \
         chunk->constants.count--;                                              \
         chunk->count -= 2;                                                     \
         return true;                                                           \
@@ -510,128 +557,128 @@ static bool foldBinary(Compiler *compiler, LangTokenType operatorType) {
         Chunk *chunk = currentChunk(compiler);                                 \
         uint8_t index = chunk->code[chunk->count - 1];                         \
         uint8_t constant = chunk->code[chunk->count - 3];                      \
-        if (chunk->code[chunk->count - 2] != OP_CONSTANT) return false;        \
-        if (chunk->code[chunk->count - 4] != OP_CONSTANT) return false;        \
-        chunk->constants.values[constant] = NUMBER_VAL(                        \
-            func(                                                              \
-                AS_NUMBER(chunk->constants.values[constant]),                  \
-                AS_NUMBER(chunk->constants.values[index])                      \
-            )                                                                  \
-        );                                                                     \
+        if (chunk->code[chunk->count - 2] != OP_CONSTANT)                      \
+            return false;                                                      \
+        if (chunk->code[chunk->count - 4] != OP_CONSTANT)                      \
+            return false;                                                      \
+        chunk->constants.values[constant] =                                    \
+            NUMBER_VAL(func(AS_NUMBER(chunk->constants.values[constant]),      \
+                            AS_NUMBER(chunk->constants.values[index])));       \
         chunk->constants.count--;                                              \
         chunk->count -= 2;                                                     \
         return true;                                                           \
     } while (false)
 
     switch (operatorType) {
-        case TOKEN_PLUS: {
-            FOLD(+);
-            return false;
-        }
+    case TOKEN_PLUS: {
+        FOLD(+);
+        return false;
+    }
 
-        case TOKEN_MINUS: {
-            FOLD(-);
-            return false;
-        }
+    case TOKEN_MINUS: {
+        FOLD(-);
+        return false;
+    }
 
-        case TOKEN_STAR: {
-            FOLD(*);
-            return false;
-        }
+    case TOKEN_STAR: {
+        FOLD(*);
+        return false;
+    }
 
-        case TOKEN_SLASH: {
-            FOLD(/);
-            return false;
-        }
+    case TOKEN_SLASH: {
+        FOLD(/);
+        return false;
+    }
 
-        case TOKEN_PERCENT: {
-            FOLD_FUNC(fmod);
-            return false;
-        }
+    case TOKEN_PERCENT: {
+        FOLD_FUNC(fmod);
+        return false;
+    }
 
-        case TOKEN_STAR_STAR: {
-            FOLD_FUNC(powf);
-            return false;
-        }
+    case TOKEN_STAR_STAR: {
+        FOLD_FUNC(powf);
+        return false;
+    }
 
-        default: {
-            return false;
-        }
+    default: {
+        return false;
+    }
     }
 #undef FOLD
 #undef FOLD_FUNC
 }
 
-static void binary(Compiler *compiler, LangToken previousToken, bool canAssign) {
+static void binary(Compiler *compiler, LangToken previousToken,
+                   bool canAssign) {
     UNUSED(canAssign);
 
     LangTokenType operatorType = compiler->parser->previous.type;
 
     ParseRule *rule = getRule(operatorType);
-    parsePrecedence(compiler, (Precedence) (rule->precedence + 1));
+    parsePrecedence(compiler, (Precedence)(rule->precedence + 1));
 
     LangTokenType currentToken = compiler->parser->previous.type;
 
     // Attempt constant fold.
     if ((previousToken.type == TOKEN_NUMBER) &&
         (currentToken == TOKEN_NUMBER || currentToken == TOKEN_LEFT_PAREN) &&
-        foldBinary(compiler, operatorType)
-            ) {
+        foldBinary(compiler, operatorType)) {
         return;
     }
 
     switch (operatorType) {
-        case TOKEN_BANG_EQUAL:
-            emitBytes(compiler, OP_EQUAL, OP_NOT);
-            break;
-        case TOKEN_EQUAL_EQUAL:
-            emitByte(compiler, OP_EQUAL);
-            break;
-        case TOKEN_GREATER:
-            emitByte(compiler, OP_GREATER);
-            break;
-        case TOKEN_GREATER_EQUAL:
-            emitBytes(compiler, OP_LESS, OP_NOT);
-            break;
-        case TOKEN_LESS:
-            emitByte(compiler, OP_LESS);
-            break;
-        case TOKEN_LESS_EQUAL:
-            emitBytes(compiler, OP_GREATER, OP_NOT);
-            break;
-        case TOKEN_PLUS:
-            emitByte(compiler, OP_ADD);
-            break;
-        case TOKEN_MINUS:
-            emitByte(compiler, OP_SUBTRACT);
-            break;
-        case TOKEN_STAR:
-            emitByte(compiler, OP_MULTIPLY);
-            break;
-        case TOKEN_STAR_STAR:
-            emitByte(compiler, OP_POW);
-            break;
-        case TOKEN_SLASH:
-            emitByte(compiler, OP_DIVIDE);
-            break;
-        case TOKEN_PERCENT:
-            emitByte(compiler, OP_MOD);
-            break;
-        case TOKEN_AMPERSAND:
-            emitByte(compiler, OP_BITWISE_AND);
-            break;
-        case TOKEN_CARET:
-            emitByte(compiler, OP_BITWISE_XOR);
-            break;
-        case TOKEN_PIPE:
-            emitByte(compiler, OP_BITWISE_OR);
-            break;
-        default:
-            return;
+    case TOKEN_BANG_EQUAL:
+        emitBytes(compiler, OP_EQUAL, OP_NOT);
+        break;
+    case TOKEN_EQUAL_EQUAL:
+        emitByte(compiler, OP_EQUAL);
+        break;
+    case TOKEN_GREATER:
+        emitByte(compiler, OP_GREATER);
+        break;
+    case TOKEN_GREATER_EQUAL:
+        emitBytes(compiler, OP_LESS, OP_NOT);
+        break;
+    case TOKEN_LESS:
+        emitByte(compiler, OP_LESS);
+        break;
+    case TOKEN_LESS_EQUAL:
+        emitBytes(compiler, OP_GREATER, OP_NOT);
+        break;
+    case TOKEN_PLUS:
+        emitByte(compiler, OP_ADD);
+        break;
+    case TOKEN_MINUS:
+        emitByte(compiler, OP_SUBTRACT);
+        break;
+    case TOKEN_STAR:
+        emitByte(compiler, OP_MULTIPLY);
+        break;
+    case TOKEN_STAR_STAR:
+        emitByte(compiler, OP_POW);
+        break;
+    case TOKEN_SLASH:
+        emitByte(compiler, OP_DIVIDE);
+        break;
+    case TOKEN_PERCENT:
+        emitByte(compiler, OP_MOD);
+        break;
+    case TOKEN_AMPERSAND:
+        emitByte(compiler, OP_BITWISE_AND);
+        break;
+    case TOKEN_CARET:
+        emitByte(compiler, OP_BITWISE_XOR);
+        break;
+    case TOKEN_PIPE:
+        emitByte(compiler, OP_BITWISE_OR);
+        break;
+    default:
+        return;
     }
 }
 
-static void ternary(Compiler *compiler, LangToken previousToken, bool canAssign) {
+static void ternary(Compiler *compiler, LangToken previousToken,
+                    bool canAssign) {
     UNUSED(previousToken);
     UNUSED(canAssign);
     // Jump to the else branch if the condition is false.
@@ -655,9 +702,13 @@ static void ternary(Compiler *compiler, LangToken previousToken, bool canAssign)
 }
 
 static void call(Compiler *compiler, LangToken previousToken, bool canAssign) {
-    UNUSED(previousToken);
     UNUSED(canAssign);
     bool unpack = false;
+
+    {
+        void* d[3] = {&previousToken.start, &previousToken.length, NULL};
+        emitExternalAstEvent(compiler, AST_FUNCTION_CALL, d, previousToken.line);
+    }
 
     int argCount = argumentList(compiler, &unpack);
 
@@ -666,7 +717,8 @@ static void call(Compiler *compiler, LangToken previousToken, bool canAssign) {
 }
 
 static bool privatePropertyExists(LangToken name, Compiler *compiler) {
-    ObjString *string = copyString(compiler->parser->vm, name.start, name.length);
+    ObjString *string =
+        copyString(compiler->parser->vm, name.start, name.length);
     Value _;
 
     return tableGet(&compiler->class->privateVariables, string, &_);
@@ -684,18 +736,25 @@ static void dot(Compiler *compiler, LangToken previousToken, bool canAssign) {
         bool unpack = false;
 
         int argCount = argumentList(compiler, &unpack);
-        if (compiler->class != NULL && (previousToken.type == TOKEN_THIS || identifiersEqual(&previousToken, &compiler->class->name))) {
+        if (compiler->class != NULL &&
+            (previousToken.type == TOKEN_THIS ||
+             identifiersEqual(&previousToken, &compiler->class->name))) {
             emitBytes(compiler, OP_INVOKE_INTERNAL, argCount);
         } else {
             emitBytes(compiler, OP_INVOKE, argCount);
+        }
+        {
+            void* d[5] = {&previousToken.start, &previousToken.length, &identifier.start, &identifier.length, NULL};
+            emitExternalAstEvent(compiler, AST_FUNCTION_CALL, d, identifier.line);
         }
 
         emitBytes(compiler, name, unpack);
         return;
     }
 
-    if (compiler->class != NULL && (previousToken.type == TOKEN_THIS &&
-                                    privatePropertyExists(identifier, compiler))) {
+    if (compiler->class != NULL &&
+        (previousToken.type == TOKEN_THIS &&
+         privatePropertyExists(identifier, compiler))) {
         if (canAssign && match(compiler, TOKEN_EQUAL)) {
             expression(compiler);
             emitBytes(compiler, OP_SET_PRIVATE_ATTRIBUTE, name);
@@ -795,21 +854,22 @@ static void literal(Compiler *compiler, bool canAssign) {
     UNUSED(canAssign);
 
     switch (compiler->parser->previous.type) {
-        case TOKEN_FALSE:
-            emitByte(compiler, OP_FALSE);
-            break;
-        case TOKEN_NIL:
-            emitByte(compiler, OP_NIL);
-            break;
-        case TOKEN_TRUE:
-            emitByte(compiler, OP_TRUE);
-            break;
-        default:
-            return; // Unreachable.
+    case TOKEN_FALSE:
+        emitByte(compiler, OP_FALSE);
+        break;
+    case TOKEN_NIL:
+        emitByte(compiler, OP_NIL);
+        break;
+    case TOKEN_TRUE:
+        emitByte(compiler, OP_TRUE);
+        break;
+    default:
+        return; // Unreachable.
     }
 }
 
 static void block(Compiler *compiler) {
+
     while (!check(compiler, TOKEN_RIGHT_BRACE) && !check(compiler, TOKEN_EOF)) {
         declaration(compiler);
     }
@@ -817,7 +877,8 @@ static void block(Compiler *compiler) {
     consume(compiler, TOKEN_RIGHT_BRACE, "Expect '}' after block.");
 }
 
-static void beginFunction(Compiler *compiler, Compiler *fnCompiler, FunctionType type, AccessLevel level) {
+static void beginFunction(Compiler *compiler, Compiler *fnCompiler,
+                          FunctionType type, AccessLevel level) {
     initCompiler(compiler->parser, fnCompiler, compiler, type, level);
     beginScope(fnCompiler);
 
@@ -836,42 +897,63 @@ static void beginFunction(Compiler *compiler, Compiler *fnCompiler, FunctionType
         do {
             // spread must come last
             if (isSpreadParam) {
-                error(fnCompiler->parser, "spread parameter must be last in the parameter list");
+                error(fnCompiler->parser,
+                      "spread parameter must be last in the parameter list");
             }
             bool varKeyword = match(compiler, TOKEN_VAR);
             bool privateKeyword = match(compiler, TOKEN_PRIVATE);
             isSpreadParam = match(compiler, TOKEN_DOT_DOT_DOT);
             consume(compiler, TOKEN_IDENTIFIER, "Expect parameter name.");
-            uint8_t paramConstant = identifierConstant(fnCompiler, &fnCompiler->parser->previous);
+            {
+                void *d[4] = {&fnCompiler->parser->previous.start,
+                              &fnCompiler->parser->previous.length,
+                              &isSpreadParam, NULL};
+                emitExternalAstEvent(fnCompiler, AST_DECLARE_FUNCTION_PARAM, d,
+                                     fnCompiler->parser->previous.line);
+            }
+            uint8_t paramConstant =
+                identifierConstant(fnCompiler, &fnCompiler->parser->previous);
             declareVariable(fnCompiler, &fnCompiler->parser->previous);
             defineVariable(fnCompiler, paramConstant, false);
 
             if (type == TYPE_INITIALIZER && varKeyword) {
-                identifiers[fnCompiler->function->propertyCount] = paramConstant;
+                identifiers[fnCompiler->function->propertyCount] =
+                    paramConstant;
                 indexes[fnCompiler->function->propertyCount++] = index;
             } else if (varKeyword) {
-                error(fnCompiler->parser, "var keyword in a function definition that is not a class constructor");
+                error(fnCompiler->parser,
+                      "var keyword in a function definition that is not a "
+                      "class constructor");
             }
             if (isSpreadParam) {
                 if (type == TYPE_INITIALIZER) {
-                    error(fnCompiler->parser, "spread parameter cannot be used in a class constructor");
+                    error(fnCompiler->parser, "spread parameter cannot be used "
+                                              "in a class constructor");
                 }
                 fnCompiler->function->isVariadic = isSpreadParam;
             }
 
             if (type == TYPE_INITIALIZER && privateKeyword) {
-                privateIdentifiers[fnCompiler->function->privatePropertyCount] = paramConstant;
-                privateIndexes[fnCompiler->function->privatePropertyCount++] = index;
+                privateIdentifiers[fnCompiler->function->privatePropertyCount] =
+                    paramConstant;
+                privateIndexes[fnCompiler->function->privatePropertyCount++] =
+                    index;
 
-                tableSet(compiler->parser->vm, &compiler->class->privateVariables,
-                        AS_STRING(currentChunk(fnCompiler)->constants.values[paramConstant]), EMPTY_VAL);
+                tableSet(compiler->parser->vm,
+                         &compiler->class->privateVariables,
+                         AS_STRING(currentChunk(fnCompiler)
+                                       ->constants.values[paramConstant]),
+                         EMPTY_VAL);
             } else if (privateKeyword) {
-                error(fnCompiler->parser, "private keyword in a function definition that is not a class constructor");
+                error(fnCompiler->parser,
+                      "private keyword in a function definition that is not a "
+                      "class constructor");
             }
 
             if (match(fnCompiler, TOKEN_EQUAL)) {
                 if (isSpreadParam) {
-                    error(fnCompiler->parser, "spread parameter cannot have an optional value");
+                    error(fnCompiler->parser,
+                          "spread parameter cannot have an optional value");
                 }
                 fnCompiler->function->arityOptional++;
                 optional = true;
@@ -880,26 +962,33 @@ static void beginFunction(Compiler *compiler, Compiler *fnCompiler, FunctionType
                 fnCompiler->function->arity++;
 
                 if (optional) {
-                    error(fnCompiler->parser, "Cannot have non-optional parameter after optional.");
+                    error(fnCompiler->parser,
+                          "Cannot have non-optional parameter after optional.");
                 }
             }
 
-            if (fnCompiler->function->arity + fnCompiler->function->arityOptional > 255) {
-                error(fnCompiler->parser, "Cannot have more than 255 parameters.");
+            if (fnCompiler->function->arity +
+                    fnCompiler->function->arityOptional >
+                255) {
+                error(fnCompiler->parser,
+                      "Cannot have more than 255 parameters.");
             }
             index++;
         } while (match(fnCompiler, TOKEN_COMMA));
 
         if (fnCompiler->function->arityOptional > 0) {
             emitByte(fnCompiler, OP_DEFINE_OPTIONAL);
-            emitBytes(fnCompiler, fnCompiler->function->arity, fnCompiler->function->arityOptional);
+            emitBytes(fnCompiler, fnCompiler->function->arity,
+                      fnCompiler->function->arityOptional);
         }
 
         if (fnCompiler->function->propertyCount > 0) {
             DictuVM *vm = fnCompiler->parser->vm;
             push(vm, OBJ_VAL(fnCompiler->function));
-            fnCompiler->function->propertyIndexes = ALLOCATE(vm, int, fnCompiler->function->propertyCount);
-            fnCompiler->function->propertyNames = ALLOCATE(vm, int, fnCompiler->function->propertyCount);
+            fnCompiler->function->propertyIndexes =
+                ALLOCATE(vm, int, fnCompiler->function->propertyCount);
+            fnCompiler->function->propertyNames =
+                ALLOCATE(vm, int, fnCompiler->function->propertyCount);
             pop(vm);
 
             for (int i = 0; i < fnCompiler->function->propertyCount; ++i) {
@@ -907,22 +996,29 @@ static void beginFunction(Compiler *compiler, Compiler *fnCompiler, FunctionType
                 fnCompiler->function->propertyIndexes[i] = indexes[i];
             }
 
-            emitBytes(fnCompiler, OP_SET_INIT_ATTRIBUTES, makeConstant(fnCompiler, OBJ_VAL(fnCompiler->function)));
+            emitBytes(fnCompiler, OP_SET_INIT_ATTRIBUTES,
+                      makeConstant(fnCompiler, OBJ_VAL(fnCompiler->function)));
         }
 
         if (fnCompiler->function->privatePropertyCount > 0) {
             DictuVM *vm = fnCompiler->parser->vm;
             push(vm, OBJ_VAL(fnCompiler->function));
-            fnCompiler->function->privatePropertyIndexes = ALLOCATE(vm, int, fnCompiler->function->privatePropertyCount);
-            fnCompiler->function->privatePropertyNames = ALLOCATE(vm, int, fnCompiler->function->privatePropertyCount);
+            fnCompiler->function->privatePropertyIndexes =
+                ALLOCATE(vm, int, fnCompiler->function->privatePropertyCount);
+            fnCompiler->function->privatePropertyNames =
+                ALLOCATE(vm, int, fnCompiler->function->privatePropertyCount);
             pop(vm);
 
-            for (int i = 0; i < fnCompiler->function->privatePropertyCount; ++i) {
-                fnCompiler->function->privatePropertyNames[i] = privateIdentifiers[i];
-                fnCompiler->function->privatePropertyIndexes[i] = privateIndexes[i];
+            for (int i = 0; i < fnCompiler->function->privatePropertyCount;
+                 ++i) {
+                fnCompiler->function->privatePropertyNames[i] =
+                    privateIdentifiers[i];
+                fnCompiler->function->privatePropertyIndexes[i] =
+                    privateIndexes[i];
             }
 
-            emitBytes(fnCompiler, OP_SET_PRIVATE_INIT_ATTRIBUTES, makeConstant(fnCompiler, OBJ_VAL(fnCompiler->function)));
+            emitBytes(fnCompiler, OP_SET_PRIVATE_INIT_ATTRIBUTES,
+                      makeConstant(fnCompiler, OBJ_VAL(fnCompiler->function)));
         }
     }
 
@@ -933,6 +1029,8 @@ static void arrow(Compiler *compiler, bool canAssign) {
     UNUSED(canAssign);
 
     Compiler fnCompiler;
+    emitExternalAstEvent(compiler, AST_DECLARE_ARROW_FUNCTION, NULL,
+                         compiler->parser->current.line);
 
     // Setup function and parse parameters
     beginFunction(compiler, &fnCompiler, TYPE_ARROW_FUNCTION, ACCESS_PUBLIC);
@@ -948,6 +1046,8 @@ static void arrow(Compiler *compiler, bool canAssign) {
         emitByte(&fnCompiler, OP_RETURN);
     }
     endCompiler(&fnCompiler);
+    emitExternalAstEvent(compiler, AST_END, NULL,
+                         compiler->parser->current.line);
 }
 
 static void grouping(Compiler *compiler, bool canAssign) {
@@ -962,7 +1062,8 @@ static Value parseNumber(Compiler *compiler, bool canAssign) {
 
     // We allocate the whole range for the worst case.
     // Also account for the null-byte.
-    char *buffer = ALLOCATE(compiler->parser->vm, char, compiler->parser->previous.length + 1);
+    char *buffer = ALLOCATE(compiler->parser->vm, char,
+                            compiler->parser->previous.length + 1);
     char *current = buffer;
 
     // Strip it of any underscores.
@@ -980,7 +1081,8 @@ static Value parseNumber(Compiler *compiler, bool canAssign) {
     // Parse the string.
     double value = strtod(buffer, NULL);
     // Free the malloc'd buffer.
-    FREE_ARRAY(compiler->parser->vm, char, buffer, compiler->parser->previous.length + 1);
+    FREE_ARRAY(compiler->parser->vm, char, buffer,
+               compiler->parser->previous.length + 1);
 
     return NUMBER_VAL(value);
 }
@@ -1021,55 +1123,55 @@ int parseEscapeSequences(Parser *parser, char *string, int length) {
     for (int i = 0; i < length - 1; i++) {
         if (string[i] == '\\') {
             switch (string[i + 1]) {
-                case 'n': {
-                    string[i + 1] = '\n';
+            case 'n': {
+                string[i + 1] = '\n';
+                break;
+            }
+            case 't': {
+                string[i + 1] = '\t';
+                break;
+            }
+            case 'r': {
+                string[i + 1] = '\r';
+                break;
+            }
+            case 'v': {
+                string[i + 1] = '\v';
+                break;
+            }
+            case 'x': {
+                if (string[i + 2] == '\0' || string[i + 3] == '\0') {
+                    error(parser, "\\x escape code expects format \\xhh");
                     break;
                 }
-                case 't': {
-                    string[i + 1] = '\t';
-                    break;
-                }
-                case 'r': {
-                    string[i + 1] = '\r';
-                    break;
-                }
-                case 'v': {
-                    string[i + 1] = '\v';
-                    break;
-                }
-                case 'x': {
-                    if (string[i + 2] == '\0' || string[i + 3] == '\0') {
-                        error(parser, "\\x escape code expects format \\xhh");
-                        break;
-                    }
 
-                    char hexChars[3];
-                    char *end;
-                    memcpy(hexChars, &string[i + 2], 2);
-                    hexChars[2] = '\0';
-                    int hex = strtol(hexChars, &end, 16);
+                char hexChars[3];
+                char *end;
+                memcpy(hexChars, &string[i + 2], 2);
+                hexChars[2] = '\0';
+                int hex = strtol(hexChars, &end, 16);
 
-                    if (hexChars == end) {
-                        error(parser, "\\x escape code failed to parse");
-                        break;
-                    }
-
-                    string[i + 3] = hex;
-                    memmove(&string[i], &string[i + 3], length - 3 - i);
-                    length -= 3;
-                    continue;
-                }
-                case '\\': {
-                    string[i + 1] = '\\';
+                if (hexChars == end) {
+                    error(parser, "\\x escape code failed to parse");
                     break;
                 }
-                case '\'':
-                case '"': {
-                    break;
-                }
-                default: {
-                    continue;
-                }
+
+                string[i + 3] = hex;
+                memmove(&string[i], &string[i + 3], length - 3 - i);
+                length -= 3;
+                continue;
+            }
+            case '\\': {
+                string[i + 1] = '\\';
+                break;
+            }
+            case '\'':
+            case '"': {
+                break;
+            }
+            default: {
+                continue;
+            }
             }
             memmove(&string[i], &string[i + 1], length - i);
             length -= 1;
@@ -1084,8 +1186,9 @@ static void rString(Compiler *compiler, bool canAssign) {
 
     if (match(compiler, TOKEN_STRING)) {
         Parser *parser = compiler->parser;
-        emitConstant(compiler, OBJ_VAL(copyString(parser->vm, parser->previous.start + 1,
-                                                  parser->previous.length - 2)));
+        emitConstant(compiler,
+                     OBJ_VAL(copyString(parser->vm, parser->previous.start + 1,
+                                        parser->previous.length - 2)));
 
         return;
     }
@@ -1106,7 +1209,8 @@ static Value parseString(Compiler *compiler, bool canAssign) {
 
     // If there were escape chars and the string shrank, resize the buffer
     if (length != stringLength) {
-        string = SHRINK_ARRAY(parser->vm, string, char, stringLength + 1, length + 1);
+        string = SHRINK_ARRAY(parser->vm, string, char, stringLength + 1,
+                              length + 1);
     }
     string[length] = '\0';
 
@@ -1154,14 +1258,21 @@ static void dict(Compiler *compiler, bool canAssign) {
     consume(compiler, TOKEN_RIGHT_BRACE, "Expected closing '}'");
 }
 
-static void subscript(Compiler *compiler, LangToken previousToken, bool canAssign) {
-    UNUSED(previousToken);
+static void subscript(Compiler *compiler, LangToken previousToken,
+                      bool canAssign) {
+
+    {
+        void* d[3] = {&previousToken.start, &previousToken.length, NULL};
+        emitExternalAstEvent(compiler, AST_SUBSCRIPT, d, previousToken.line);
+    }
     // slice with no initial index [1, 2, 3][:100]
     if (match(compiler, TOKEN_COLON)) {
         emitByte(compiler, OP_EMPTY);
         expression(compiler);
         emitByte(compiler, OP_SLICE);
         consume(compiler, TOKEN_RIGHT_BRACKET, "Expected closing ']'");
+            emitExternalAstEvent(compiler, AST_SUBSCRIPT_END, NULL, previousToken.line);
+
         return;
     }
 
@@ -1178,6 +1289,8 @@ static void subscript(Compiler *compiler, LangToken previousToken, bool canAssig
         }
         emitByte(compiler, OP_SLICE);
         consume(compiler, TOKEN_RIGHT_BRACKET, "Expected closing ']'");
+            emitExternalAstEvent(compiler, AST_SUBSCRIPT_END, NULL, previousToken.line);
+
         return;
     }
 
@@ -1217,6 +1330,7 @@ static void subscript(Compiler *compiler, LangToken previousToken, bool canAssig
     } else {
         emitByte(compiler, OP_SUBSCRIPT);
     }
+    emitExternalAstEvent(compiler, AST_SUBSCRIPT_END, NULL, previousToken.line);
 }
 
 static void checkConst(Compiler *compiler, uint8_t setOp, int arg) {
@@ -1232,7 +1346,9 @@ static void checkConst(Compiler *compiler, uint8_t setOp, int arg) {
         }
     } else if (setOp == OP_SET_MODULE) {
         Value _;
-        if (tableGet(&compiler->parser->vm->constants, AS_STRING(currentChunk(compiler)->constants.values[arg]), &_)) {
+        if (tableGet(&compiler->parser->vm->constants,
+                     AS_STRING(currentChunk(compiler)->constants.values[arg]),
+                     &_)) {
             error(compiler->parser, "Cannot assign to a constant.");
         }
     }
@@ -1249,7 +1365,8 @@ static void namedVariable(Compiler *compiler, LangToken name, bool canAssign) {
         setOp = OP_SET_UPVALUE;
     } else {
         arg = identifierConstant(compiler, &name);
-        ObjString *string = copyString(compiler->parser->vm, name.start, name.length);
+        ObjString *string =
+            copyString(compiler->parser->vm, name.start, name.length);
         Value value;
         if (tableGet(&compiler->parser->vm->globals, string, &value)) {
             getOp = OP_GET_GLOBAL;
@@ -1263,51 +1380,55 @@ static void namedVariable(Compiler *compiler, LangToken name, bool canAssign) {
     if (canAssign && match(compiler, TOKEN_EQUAL)) {
         checkConst(compiler, setOp, arg);
         expression(compiler);
-        emitBytes(compiler, setOp, (uint8_t) arg);
+        {
+            void *d[3] = {&name.start, &name.length, NULL};
+            emitExternalAstEvent(compiler, AST_SET, d, name.line);
+        }
+        emitBytes(compiler, setOp, (uint8_t)arg);
     } else if (canAssign && match(compiler, TOKEN_PLUS_EQUALS)) {
         checkConst(compiler, setOp, arg);
         namedVariable(compiler, name, false);
         expression(compiler);
         emitByte(compiler, OP_ADD);
-        emitBytes(compiler, setOp, (uint8_t) arg);
+        emitBytes(compiler, setOp, (uint8_t)arg);
     } else if (canAssign && match(compiler, TOKEN_MINUS_EQUALS)) {
         checkConst(compiler, setOp, arg);
         namedVariable(compiler, name, false);
         expression(compiler);
         emitByte(compiler, OP_SUBTRACT);
-        emitBytes(compiler, setOp, (uint8_t) arg);
+        emitBytes(compiler, setOp, (uint8_t)arg);
     } else if (canAssign && match(compiler, TOKEN_MULTIPLY_EQUALS)) {
         checkConst(compiler, setOp, arg);
         namedVariable(compiler, name, false);
         expression(compiler);
         emitByte(compiler, OP_MULTIPLY);
-        emitBytes(compiler, setOp, (uint8_t) arg);
+        emitBytes(compiler, setOp, (uint8_t)arg);
     } else if (canAssign && match(compiler, TOKEN_DIVIDE_EQUALS)) {
         checkConst(compiler, setOp, arg);
         namedVariable(compiler, name, false);
         expression(compiler);
         emitByte(compiler, OP_DIVIDE);
-        emitBytes(compiler, setOp, (uint8_t) arg);
+        emitBytes(compiler, setOp, (uint8_t)arg);
     } else if (canAssign && match(compiler, TOKEN_AMPERSAND_EQUALS)) {
         checkConst(compiler, setOp, arg);
         namedVariable(compiler, name, false);
         expression(compiler);
         emitByte(compiler, OP_BITWISE_AND);
-        emitBytes(compiler, setOp, (uint8_t) arg);
+        emitBytes(compiler, setOp, (uint8_t)arg);
     } else if (canAssign && match(compiler, TOKEN_CARET_EQUALS)) {
         checkConst(compiler, setOp, arg);
         namedVariable(compiler, name, false);
         expression(compiler);
         emitByte(compiler, OP_BITWISE_XOR);
-        emitBytes(compiler, setOp, (uint8_t) arg);
+        emitBytes(compiler, setOp, (uint8_t)arg);
     } else if (canAssign && match(compiler, TOKEN_PIPE_EQUALS)) {
         checkConst(compiler, setOp, arg);
         namedVariable(compiler, name, false);
         expression(compiler);
         emitByte(compiler, OP_BITWISE_OR);
-        emitBytes(compiler, setOp, (uint8_t) arg);
+        emitBytes(compiler, setOp, (uint8_t)arg);
     } else {
-        emitBytes(compiler, getOp, (uint8_t) arg);
+        emitBytes(compiler, getOp, (uint8_t)arg);
     }
 }
 
@@ -1318,12 +1439,13 @@ static void variable(Compiler *compiler, bool canAssign) {
 static LangToken syntheticToken(const char *text) {
     LangToken token;
     token.start = text;
-    token.length = (int) strlen(text);
+    token.length = (int)strlen(text);
     return token;
 }
 
 static void pushSuperclass(Compiler *compiler) {
-    if (compiler->class == NULL) return;
+    if (compiler->class == NULL)
+        return;
     namedVariable(compiler, syntheticToken("super"), false);
 }
 
@@ -1333,7 +1455,8 @@ static void super_(Compiler *compiler, bool canAssign) {
     if (compiler->class == NULL) {
         error(compiler->parser, "Cannot utilise 'super' outside of a class.");
     } else if (!compiler->class->hasSuperclass) {
-        error(compiler->parser, "Cannot utilise 'super' in a class with no superclass.");
+        error(compiler->parser,
+              "Cannot utilise 'super' in a class with no superclass.");
     }
 
     consume(compiler, TOKEN_DOT, "Expect '.' after 'super'.");
@@ -1362,7 +1485,8 @@ static void this_(Compiler *compiler, bool canAssign) {
     if (compiler->class == NULL) {
         error(compiler->parser, "Cannot utilise 'this' outside of a class.");
     } else if (compiler->class->staticMethod) {
-        error(compiler->parser, "Cannot utilise 'this' inside a static method.");
+        error(compiler->parser,
+              "Cannot utilise 'this' inside a static method.");
     } else {
         variable(compiler, false);
     }
@@ -1374,7 +1498,8 @@ static void private_(Compiler *compiler, bool canAssign) {
     if (compiler->class == NULL) {
         error(compiler->parser, "Cannot utilise 'private' outside of a class.");
     } else if (compiler->class->abstractClass) {
-        error(compiler->parser, "Cannot utilise 'private' inside of an abstract class.");
+        error(compiler->parser,
+              "Cannot utilise 'private' inside of an abstract class.");
     }
 }
 
@@ -1392,7 +1517,12 @@ static void useStatement(Compiler *compiler) {
     }
 
     do {
-        consume(compiler, TOKEN_IDENTIFIER, "Expect trait name after use statement.");
+        consume(compiler, TOKEN_IDENTIFIER,
+                "Expect trait name after use statement.");
+        {
+            void* d[3] = {&compiler->parser->previous.start, &compiler->parser->previous.length, NULL};
+            emitExternalAstEvent(compiler, AST_USE_STATEMENT, d, compiler->parser->previous.line);
+        }
         namedVariable(compiler, compiler->parser->previous, false);
         emitByte(compiler, OP_USE);
     } while (match(compiler, TOKEN_COMMA));
@@ -1404,34 +1534,35 @@ static bool foldUnary(Compiler *compiler, LangTokenType operatorType) {
     LangTokenType valueToken = compiler->parser->previous.type;
 
     switch (operatorType) {
-        case TOKEN_NOT: {
-            if (valueToken == TOKEN_TRUE) {
-                Chunk *chunk = currentChunk(compiler);
-                chunk->code[chunk->count - 1] = OP_FALSE;
-                return true;
-            } else if (valueToken == TOKEN_FALSE) {
-                Chunk *chunk = currentChunk(compiler);
-                chunk->code[chunk->count - 1] = OP_TRUE;
-                return true;
-            }
-
-            return false;
+    case TOKEN_NOT: {
+        if (valueToken == TOKEN_TRUE) {
+            Chunk *chunk = currentChunk(compiler);
+            chunk->code[chunk->count - 1] = OP_FALSE;
+            return true;
+        } else if (valueToken == TOKEN_FALSE) {
+            Chunk *chunk = currentChunk(compiler);
+            chunk->code[chunk->count - 1] = OP_TRUE;
+            return true;
         }
 
-        case TOKEN_MINUS: {
-            if (valueToken == TOKEN_NUMBER) {
-                Chunk *chunk = currentChunk(compiler);
-                uint8_t constant = chunk->code[chunk->count - 1];
-                chunk->constants.values[constant] = NUMBER_VAL(-AS_NUMBER(chunk->constants.values[constant]));
-                return true;
-            }
+        return false;
+    }
 
-            return false;
+    case TOKEN_MINUS: {
+        if (valueToken == TOKEN_NUMBER) {
+            Chunk *chunk = currentChunk(compiler);
+            uint8_t constant = chunk->code[chunk->count - 1];
+            chunk->constants.values[constant] =
+                NUMBER_VAL(-AS_NUMBER(chunk->constants.values[constant]));
+            return true;
         }
 
-        default: {
-            return false;
-        }
+        return false;
+    }
+
+    default: {
+        return false;
+    }
     }
 }
 
@@ -1447,94 +1578,94 @@ static void unary(Compiler *compiler, bool canAssign) {
     }
 
     switch (operatorType) {
-        case TOKEN_NOT:
-            emitByte(compiler, OP_NOT);
-            break;
-        case TOKEN_MINUS:
-            emitByte(compiler, OP_NEGATE);
-            break;
-        default:
-            return;
+    case TOKEN_NOT:
+        emitByte(compiler, OP_NOT);
+        break;
+    case TOKEN_MINUS:
+        emitByte(compiler, OP_NEGATE);
+        break;
+    default:
+        return;
     }
 }
 
 ParseRule rules[] = {
-        {grouping, call,      PREC_CALL},               // TOKEN_LEFT_PAREN
-        {NULL,     NULL,      PREC_NONE},               // TOKEN_RIGHT_PAREN
-        {dict,     NULL,      PREC_NONE},               // TOKEN_LEFT_BRACE [big]
-        {NULL,     NULL,      PREC_NONE},               // TOKEN_RIGHT_BRACE
-        {list,     subscript, PREC_CALL},               // TOKEN_LEFT_BRACKET
-        {NULL,     NULL,      PREC_NONE},               // TOKEN_RIGHT_BRACKET
-        {NULL,     NULL,      PREC_NONE},               // TOKEN_COMMA
-        {NULL,     dot,       PREC_CALL},               // TOKEN_DOT
-        {unary,    binary,    PREC_TERM},               // TOKEN_MINUS
-        {NULL,     binary,    PREC_TERM},               // TOKEN_PLUS
-        {NULL,     ternary,   PREC_ASSIGNMENT},         // TOKEN_QUESTION
-        {NULL,     chain,     PREC_CHAIN},              // TOKEN_QUESTION_DOT
-        {NULL,     NULL,      PREC_NONE},               // TOKEN_PLUS_EQUALS
-        {NULL,     NULL,      PREC_NONE},               // TOKEN_MINUS_EQUALS
-        {NULL,     NULL,      PREC_NONE},               // TOKEN_MULTIPLY_EQUALS
-        {NULL,     NULL,      PREC_NONE},               // TOKEN_DIVIDE_EQUALS
-        {NULL,     NULL,      PREC_NONE},               // TOKEN_SEMICOLON
-        {NULL,     NULL,      PREC_NONE},               // TOKEN_COLON
-        {NULL,     binary,    PREC_FACTOR},             // TOKEN_SLASH
-        {NULL,     binary,    PREC_FACTOR},             // TOKEN_STAR
-        {NULL,     binary,    PREC_INDICES},            // TOKEN_STAR_STAR
-        {NULL,     binary,    PREC_FACTOR},             // TOKEN_PERCENT
-        {NULL,     NULL,      PREC_NONE},               // TOKEN_AT
-        {NULL,     binary,    PREC_BITWISE_AND},        // TOKEN_AMPERSAND
-        {NULL,     binary,    PREC_BITWISE_XOR},        // TOKEN_CARET
-        {NULL,     binary,    PREC_BITWISE_OR},         // TOKEN_PIPE
-        {NULL,     NULL,      PREC_NONE},               // TOKEN_AMPERSAND_EQUALS
-        {NULL,     NULL,      PREC_NONE},               // TOKEN_CARET_EQUALS
-        {NULL,     NULL,      PREC_NONE},               // TOKEN_PIPE_EQUALS
-        {unary,    NULL,      PREC_NONE},               // TOKEN_NOT
-        {NULL,     binary,    PREC_EQUALITY},           // TOKEN_BANG_EQUAL
-        {NULL,     NULL,      PREC_NONE},               // TOKEN_EQUAL
-        {NULL,     binary,    PREC_EQUALITY},           // TOKEN_EQUAL_EQUAL
-        {NULL,     binary,    PREC_COMPARISON},         // TOKEN_GREATER
-        {NULL,     binary,    PREC_COMPARISON},         // TOKEN_GREATER_EQUAL
-        {NULL,     binary,    PREC_COMPARISON},         // TOKEN_LESS
-        {NULL,     binary,    PREC_COMPARISON},         // TOKEN_LESS_EQUAL
-        {rString,  NULL,      PREC_NONE},               // TOKEN_R
-        {NULL,     NULL,      PREC_NONE},               // TOKEN_ARROW
-        {NULL,     NULL,      PREC_NONE},               // TOKEN_DOT_DOT_DOT
-        {variable, NULL,      PREC_NONE},               // TOKEN_IDENTIFIER
-        {string,   NULL,      PREC_NONE},               // TOKEN_STRING
-        {number,   NULL,      PREC_NONE},               // TOKEN_NUMBER
-        {NULL,     NULL,      PREC_NONE},               // TOKEN_ABSTRACT
-        {NULL,     NULL,      PREC_NONE},               // TOKEN_CLASS
-        {NULL,     NULL,      PREC_NONE},               // TOKEN_TRAIT
-        {NULL,     NULL,      PREC_NONE},               // TOKEN_USE
-        {static_,  NULL,      PREC_NONE},               // TOKEN_STATIC
-        {private_, NULL,      PREC_NONE},               // TOKEN_PRIVATE
-        {this_,    NULL,      PREC_NONE},               // TOKEN_THIS
-        {super_,   NULL,      PREC_NONE},               // TOKEN_SUPER
-        {arrow,    NULL,      PREC_NONE},               // TOKEN_DEF
-        {NULL,     NULL,      PREC_NONE},               // TOKEN_AS
-        {NULL,     NULL,      PREC_NONE},               // TOKEN_ENUM
-        {NULL,     NULL,      PREC_NONE},               // TOKEN_IF
-        {NULL,     and_,      PREC_AND},                // TOKEN_AND
-        {NULL,     NULL,      PREC_NONE},               // TOKEN_ELSE
-        {NULL,     or_,       PREC_OR},                 // TOKEN_OR               
-        {NULL,	   NULL,      PREC_NONE},               // TOKEN_SWITCH
-        {NULL,	   NULL,      PREC_NONE},               // TOKEN_CASE
-        {NULL,     NULL,      PREC_NONE},               // TOKEN_DEFUALT
-        {NULL,     NULL,      PREC_NONE},               // TOKEN_VAR
-        {NULL,     NULL,      PREC_NONE},               // TOKEN_CONST
-        {literal,  NULL,      PREC_NONE},               // TOKEN_TRUE
-        {literal,  NULL,      PREC_NONE},               // TOKEN_FALSE
-        {literal,  NULL,      PREC_NONE},               // TOKEN_NIL
-        {NULL,     NULL,      PREC_NONE},               // TOKEN_FOR
-        {NULL,     NULL,      PREC_NONE},               // TOKEN_WHILE
-        {NULL,     NULL,      PREC_NONE},               // TOKEN_BREAK
-        {NULL,     NULL,      PREC_NONE},               // TOKEN_RETURN
-        {NULL,     NULL,      PREC_NONE},               // TOKEN_CONTINUE
-        {NULL,     NULL,      PREC_NONE},               // TOKEN_WITH
-        {NULL,     NULL,      PREC_NONE},               // TOKEN_EOF
-        {NULL,     NULL,      PREC_NONE},               // TOKEN_IMPORT
-        {NULL,     NULL,      PREC_NONE},               // TOKEN_FROM
-        {NULL,     NULL,      PREC_NONE},               // TOKEN_ERROR
+    {grouping, call, PREC_CALL},      // TOKEN_LEFT_PAREN
+    {NULL, NULL, PREC_NONE},          // TOKEN_RIGHT_PAREN
+    {dict, NULL, PREC_NONE},          // TOKEN_LEFT_BRACE [big]
+    {NULL, NULL, PREC_NONE},          // TOKEN_RIGHT_BRACE
+    {list, subscript, PREC_CALL},     // TOKEN_LEFT_BRACKET
+    {NULL, NULL, PREC_NONE},          // TOKEN_RIGHT_BRACKET
+    {NULL, NULL, PREC_NONE},          // TOKEN_COMMA
+    {NULL, dot, PREC_CALL},           // TOKEN_DOT
+    {unary, binary, PREC_TERM},       // TOKEN_MINUS
+    {NULL, binary, PREC_TERM},        // TOKEN_PLUS
+    {NULL, ternary, PREC_ASSIGNMENT}, // TOKEN_QUESTION
+    {NULL, chain, PREC_CHAIN},        // TOKEN_QUESTION_DOT
+    {NULL, NULL, PREC_NONE},          // TOKEN_PLUS_EQUALS
+    {NULL, NULL, PREC_NONE},          // TOKEN_MINUS_EQUALS
+    {NULL, NULL, PREC_NONE},          // TOKEN_MULTIPLY_EQUALS
+    {NULL, NULL, PREC_NONE},          // TOKEN_DIVIDE_EQUALS
+    {NULL, NULL, PREC_NONE},          // TOKEN_SEMICOLON
+    {NULL, NULL, PREC_NONE},          // TOKEN_COLON
+    {NULL, binary, PREC_FACTOR},      // TOKEN_SLASH
+    {NULL, binary, PREC_FACTOR},      // TOKEN_STAR
+    {NULL, binary, PREC_INDICES},     // TOKEN_STAR_STAR
+    {NULL, binary, PREC_FACTOR},      // TOKEN_PERCENT
+    {NULL, NULL, PREC_NONE},          // TOKEN_AT
+    {NULL, binary, PREC_BITWISE_AND}, // TOKEN_AMPERSAND
+    {NULL, binary, PREC_BITWISE_XOR}, // TOKEN_CARET
+    {NULL, binary, PREC_BITWISE_OR},  // TOKEN_PIPE
+    {NULL, NULL, PREC_NONE},          // TOKEN_AMPERSAND_EQUALS
+    {NULL, NULL, PREC_NONE},          // TOKEN_CARET_EQUALS
+    {NULL, NULL, PREC_NONE},          // TOKEN_PIPE_EQUALS
+    {unary, NULL, PREC_NONE},         // TOKEN_NOT
+    {NULL, binary, PREC_EQUALITY},    // TOKEN_BANG_EQUAL
+    {NULL, NULL, PREC_NONE},          // TOKEN_EQUAL
+    {NULL, binary, PREC_EQUALITY},    // TOKEN_EQUAL_EQUAL
+    {NULL, binary, PREC_COMPARISON},  // TOKEN_GREATER
+    {NULL, binary, PREC_COMPARISON},  // TOKEN_GREATER_EQUAL
+    {NULL, binary, PREC_COMPARISON},  // TOKEN_LESS
+    {NULL, binary, PREC_COMPARISON},  // TOKEN_LESS_EQUAL
+    {rString, NULL, PREC_NONE},       // TOKEN_R
+    {NULL, NULL, PREC_NONE},          // TOKEN_ARROW
+    {NULL, NULL, PREC_NONE},          // TOKEN_DOT_DOT_DOT
+    {variable, NULL, PREC_NONE},      // TOKEN_IDENTIFIER
+    {string, NULL, PREC_NONE},        // TOKEN_STRING
+    {number, NULL, PREC_NONE},        // TOKEN_NUMBER
+    {NULL, NULL, PREC_NONE},          // TOKEN_ABSTRACT
+    {NULL, NULL, PREC_NONE},          // TOKEN_CLASS
+    {NULL, NULL, PREC_NONE},          // TOKEN_TRAIT
+    {NULL, NULL, PREC_NONE},          // TOKEN_USE
+    {static_, NULL, PREC_NONE},       // TOKEN_STATIC
+    {private_, NULL, PREC_NONE},      // TOKEN_PRIVATE
+    {this_, NULL, PREC_NONE},         // TOKEN_THIS
+    {super_, NULL, PREC_NONE},        // TOKEN_SUPER
+    {arrow, NULL, PREC_NONE},         // TOKEN_DEF
+    {NULL, NULL, PREC_NONE},          // TOKEN_AS
+    {NULL, NULL, PREC_NONE},          // TOKEN_ENUM
+    {NULL, NULL, PREC_NONE},          // TOKEN_IF
+    {NULL, and_, PREC_AND},           // TOKEN_AND
+    {NULL, NULL, PREC_NONE},          // TOKEN_ELSE
+    {NULL, or_, PREC_OR},             // TOKEN_OR
+    {NULL, NULL, PREC_NONE},          // TOKEN_SWITCH
+    {NULL, NULL, PREC_NONE},          // TOKEN_CASE
+    {NULL, NULL, PREC_NONE},          // TOKEN_DEFUALT
+    {NULL, NULL, PREC_NONE},          // TOKEN_VAR
+    {NULL, NULL, PREC_NONE},          // TOKEN_CONST
+    {literal, NULL, PREC_NONE},       // TOKEN_TRUE
+    {literal, NULL, PREC_NONE},       // TOKEN_FALSE
+    {literal, NULL, PREC_NONE},       // TOKEN_NIL
+    {NULL, NULL, PREC_NONE},          // TOKEN_FOR
+    {NULL, NULL, PREC_NONE},          // TOKEN_WHILE
+    {NULL, NULL, PREC_NONE},          // TOKEN_BREAK
+    {NULL, NULL, PREC_NONE},          // TOKEN_RETURN
+    {NULL, NULL, PREC_NONE},          // TOKEN_CONTINUE
+    {NULL, NULL, PREC_NONE},          // TOKEN_WITH
+    {NULL, NULL, PREC_NONE},          // TOKEN_EOF
+    {NULL, NULL, PREC_NONE},          // TOKEN_IMPORT
+    {NULL, NULL, PREC_NONE},          // TOKEN_FROM
+    {NULL, NULL, PREC_NONE},          // TOKEN_ERROR
 };
 
 static void parsePrecedence(Compiler *compiler, Precedence precedence) {
@@ -1563,9 +1694,7 @@ static void parsePrecedence(Compiler *compiler, Precedence precedence) {
     }
 }
 
-static ParseRule *getRule(LangTokenType type) {
-    return &rules[type];
-}
+static ParseRule *getRule(LangTokenType type) { return &rules[type]; }
 
 void expression(Compiler *compiler) {
     parsePrecedence(compiler, PREC_ASSIGNMENT);
@@ -1587,7 +1716,8 @@ static void function(Compiler *compiler, FunctionType type, AccessLevel level) {
     endCompiler(&fnCompiler);
 }
 
-static void method(Compiler *compiler, bool private, LangToken *identifier, bool *hasAnnotation) {
+static void method(Compiler *compiler, bool private, LangToken *identifier,
+                   bool *hasAnnotation) {
     AccessLevel level = ACCESS_PUBLIC;
     FunctionType type;
 
@@ -1596,7 +1726,8 @@ static void method(Compiler *compiler, bool private, LangToken *identifier, bool
 
     if (match(compiler, TOKEN_PRIVATE) || private) {
         if (compiler->class->abstractClass) {
-            error(compiler->parser, "Private methods can not appear within abstract classes.");
+            error(compiler->parser,
+                  "Private methods can not appear within abstract classes.");
             return;
         }
 
@@ -1608,7 +1739,8 @@ static void method(Compiler *compiler, bool private, LangToken *identifier, bool
         compiler->class->staticMethod = true;
     } else if (match(compiler, TOKEN_ABSTRACT)) {
         if (!compiler->class->abstractClass) {
-            error(compiler->parser, "Abstract methods can only appear within abstract classes.");
+            error(compiler->parser,
+                  "Abstract methods can only appear within abstract classes.");
             return;
         }
 
@@ -1631,16 +1763,27 @@ static void method(Compiler *compiler, bool private, LangToken *identifier, bool
         DictuVM *vm = compiler->parser->vm;
 
         Value existingDict;
-        dictGet(compiler->methodAnnotations, OBJ_VAL(vm->annotationString), &existingDict);
-        ObjString *methodName = AS_STRING(currentChunk(compiler)->constants.values[constant]);
-        dictSet(vm, compiler->methodAnnotations, OBJ_VAL(methodName), existingDict);
-        dictDelete(vm, compiler->methodAnnotations, OBJ_VAL(vm->annotationString));
+        dictGet(compiler->methodAnnotations, OBJ_VAL(vm->annotationString),
+                &existingDict);
+        ObjString *methodName =
+            AS_STRING(currentChunk(compiler)->constants.values[constant]);
+        dictSet(vm, compiler->methodAnnotations, OBJ_VAL(methodName),
+                existingDict);
+        dictDelete(vm, compiler->methodAnnotations,
+                   OBJ_VAL(vm->annotationString));
 
         *hasAnnotation = false;
     }
-
+    {
+        void *d[4] = {&(identifier->start), &(identifier->length),
+                      &(compiler->class->staticMethod), NULL};
+        emitExternalAstEvent(compiler, AST_DECLARE_FUNCTION, d,
+                             identifier->line);
+    }
     if (type != TYPE_ABSTRACT) {
+        emitExternalAstEvent(compiler, AST_BLOCK, NULL, compiler->parser->current.line);
         function(compiler, type, level);
+        emitExternalAstEvent(compiler, AST_BLOCK_END, NULL, compiler->parser->current.line);
     } else {
         Compiler fnCompiler;
 
@@ -1649,15 +1792,18 @@ static void method(Compiler *compiler, bool private, LangToken *identifier, bool
         endCompiler(&fnCompiler);
 
         if (check(compiler, TOKEN_LEFT_BRACE)) {
-            error(compiler->parser, "Abstract methods can not have an implementation.");
+            error(compiler->parser,
+                  "Abstract methods can not have an implementation.");
             return;
         }
     }
-
+    emitExternalAstEvent(compiler, AST_END, NULL,
+                         compiler->parser->previous.line);
     emitBytes(compiler, OP_METHOD, constant);
 }
 
-static void setupClassCompiler(Compiler *compiler, ClassCompiler *classCompiler, bool abstract) {
+static void setupClassCompiler(Compiler *compiler, ClassCompiler *classCompiler,
+                               bool abstract) {
     classCompiler->name = compiler->parser->previous;
     classCompiler->hasSuperclass = false;
     classCompiler->enclosing = compiler->class;
@@ -1672,29 +1818,35 @@ static void endClassCompiler(Compiler *compiler, ClassCompiler *classCompiler) {
     compiler->class = compiler->class->enclosing;
 
     if (compiler->classAnnotations != NULL) {
-        int classAnnotationsConstant = makeConstant(compiler, OBJ_VAL(compiler->classAnnotations));
-        emitBytes(compiler, OP_DEFINE_CLASS_ANNOTATIONS, classAnnotationsConstant);
+        int classAnnotationsConstant =
+            makeConstant(compiler, OBJ_VAL(compiler->classAnnotations));
+        emitBytes(compiler, OP_DEFINE_CLASS_ANNOTATIONS,
+                  classAnnotationsConstant);
         compiler->classAnnotations = NULL;
     }
 
     if (compiler->methodAnnotations != NULL) {
-        int methodAnnotationsConstant = makeConstant(compiler, OBJ_VAL(compiler->methodAnnotations));
-        emitBytes(compiler, OP_DEFINE_METHOD_ANNOTATIONS, methodAnnotationsConstant);
+        int methodAnnotationsConstant =
+            makeConstant(compiler, OBJ_VAL(compiler->methodAnnotations));
+        emitBytes(compiler, OP_DEFINE_METHOD_ANNOTATIONS,
+                  methodAnnotationsConstant);
         compiler->methodAnnotations = NULL;
     }
 
     if (compiler->fieldAnnotations != NULL) {
-        int fieldAnnotationsConstant = makeConstant(compiler, OBJ_VAL(compiler->fieldAnnotations));
-        emitBytes(compiler, OP_DEFINE_FIELD_ANNOTATIONS, fieldAnnotationsConstant);
+        int fieldAnnotationsConstant =
+            makeConstant(compiler, OBJ_VAL(compiler->fieldAnnotations));
+        emitBytes(compiler, OP_DEFINE_FIELD_ANNOTATIONS,
+                  fieldAnnotationsConstant);
         compiler->fieldAnnotations = NULL;
     }
 }
 
 static bool checkLiteralToken(Compiler *compiler) {
     return check(compiler, TOKEN_STRING) || check(compiler, TOKEN_NUMBER) ||
-        check(compiler, TOKEN_TRUE) || check(compiler, TOKEN_FALSE)
-        || check(compiler, TOKEN_NIL) || check(compiler, TOKEN_LEFT_BRACKET)
-        || check(compiler, TOKEN_LEFT_BRACE);
+           check(compiler, TOKEN_TRUE) || check(compiler, TOKEN_FALSE) ||
+           check(compiler, TOKEN_NIL) || check(compiler, TOKEN_LEFT_BRACKET) ||
+           check(compiler, TOKEN_LEFT_BRACE);
 }
 
 static Value parseDict(Compiler *compiler);
@@ -1733,7 +1885,9 @@ static Value parseDict(Compiler *compiler) {
         Value key = parseValue(compiler);
 
         if (IS_EMPTY(key) || IS_DICT(key)) {
-            errorAtCurrent(compiler->parser, "Invalid key type for annotation dictionary, allowed: bool, number, string, nil");
+            errorAtCurrent(compiler->parser,
+                           "Invalid key type for annotation dictionary, "
+                           "allowed: bool, number, string, nil");
             return EMPTY_VAL;
         }
 
@@ -1742,7 +1896,9 @@ static Value parseDict(Compiler *compiler) {
         push(vm, key);
         Value value = parseValue(compiler);
         if (IS_EMPTY(value)) {
-            errorAtCurrent(compiler->parser, "Invalid value type for annotation dictionary, allowed: dict, list, bool, number, string, nil");
+            errorAtCurrent(compiler->parser,
+                           "Invalid value type for annotation dictionary, "
+                           "allowed: dict, list, bool, number, string, nil");
             return EMPTY_VAL;
         }
 
@@ -1772,7 +1928,9 @@ static Value parseList(Compiler *compiler) {
         Value value = parseValue(compiler);
 
         if (IS_EMPTY(value)) {
-            errorAtCurrent(compiler->parser, "Invalid value type for annotation list, allowed: dict, list, bool, number, string, nil");
+            errorAtCurrent(compiler->parser,
+                           "Invalid value type for annotation list, allowed: "
+                           "dict, list, bool, number, string, nil");
             return EMPTY_VAL;
         }
 
@@ -1794,14 +1952,16 @@ static void parseAnnotations(Compiler *compiler, ObjDict *annotationDict) {
 
     do {
         consume(compiler, TOKEN_IDENTIFIER, "Expected annotation identifier");
-        Value annotationName = OBJ_VAL(copyString(vm, compiler->parser->previous.start,
-                                                  compiler->parser->previous.length));
+        Value annotationName =
+            OBJ_VAL(copyString(vm, compiler->parser->previous.start,
+                               compiler->parser->previous.length));
         push(vm, annotationName);
 
         if (match(compiler, TOKEN_LEFT_PAREN)) {
             if (!checkLiteralToken(compiler)) {
                 errorAtCurrent(compiler->parser,
-                               "Annotations can only have literal values of type string, bool, number or nil.");
+                               "Annotations can only have literal values of "
+                               "type string, bool, number or nil.");
                 return;
             }
 
@@ -1833,7 +1993,8 @@ static void parseAnnotations(Compiler *compiler, ObjDict *annotationDict) {
                 dictSet(vm, annotationDict, annotationName, NIL_VAL);
             }
 
-            consume(compiler, TOKEN_RIGHT_PAREN, "Expect ')' after annotation value.");
+            consume(compiler, TOKEN_RIGHT_PAREN,
+                    "Expect ')' after annotation value.");
         } else {
             dictSet(vm, annotationDict, annotationName, NIL_VAL);
         }
@@ -1850,7 +2011,8 @@ static void parseFieldAnnotations(Compiler *compiler) {
 
     ObjDict *annotationDict = newDict(vm);
     push(vm, OBJ_VAL(annotationDict));
-    dictSet(vm, compiler->fieldAnnotations, OBJ_VAL(vm->annotationString), OBJ_VAL(annotationDict));
+    dictSet(vm, compiler->fieldAnnotations, OBJ_VAL(vm->annotationString),
+            OBJ_VAL(annotationDict));
     pop(vm);
 
     parseAnnotations(compiler, annotationDict);
@@ -1864,7 +2026,8 @@ static void parseMethodAnnotations(Compiler *compiler) {
 
     ObjDict *annotationDict = newDict(vm);
     push(vm, OBJ_VAL(annotationDict));
-    dictSet(vm, compiler->methodAnnotations, OBJ_VAL(vm->annotationString), OBJ_VAL(annotationDict));
+    dictSet(vm, compiler->methodAnnotations, OBJ_VAL(vm->annotationString),
+            OBJ_VAL(annotationDict));
     pop(vm);
 
     parseAnnotations(compiler, annotationDict);
@@ -1893,7 +2056,8 @@ static bool isFieldAnnotation(Compiler *compiler) {
         }
     } while (match(compiler, TOKEN_AT));
 
-    bool isAttribute = check(compiler, TOKEN_VAR) || check(compiler, TOKEN_CONST);
+    bool isAttribute =
+        check(compiler, TOKEN_VAR) || check(compiler, TOKEN_CONST);
 
     compiler->parser = previousCompiler;
     compiler->parser->scanner = scanner;
@@ -1909,52 +2073,67 @@ static void parseClassBody(Compiler *compiler) {
     while (!check(compiler, TOKEN_RIGHT_BRACE) && !check(compiler, TOKEN_EOF)) {
         if (match(compiler, TOKEN_USE)) {
             if (hasAnnotation) {
-                consume(compiler, TOKEN_USE, "Annotations not allowed on `use` statements\n");
+                consume(compiler, TOKEN_USE,
+                        "Annotations not allowed on `use` statements\n");
             }
 
             useStatement(compiler);
         } else if (match(compiler, TOKEN_VAR)) {
             consume(compiler, TOKEN_IDENTIFIER, "Expect class variable name.");
-            uint8_t name = identifierConstant(compiler, &compiler->parser->previous);
-            consume(compiler, TOKEN_EQUAL, "Expect '=' after class variable identifier.");
+            uint8_t name =
+                identifierConstant(compiler, &compiler->parser->previous);
+            consume(compiler, TOKEN_EQUAL,
+                    "Expect '=' after class variable identifier.");
             expression(compiler);
             emitBytes(compiler, OP_SET_CLASS_VAR, name);
             emitByte(compiler, false);
 
             if (hasAnnotation) {
                 DictuVM *vm = compiler->parser->vm;
-                ObjString *varName = AS_STRING(currentChunk(compiler)->constants.values[name]);
+                ObjString *varName =
+                    AS_STRING(currentChunk(compiler)->constants.values[name]);
 
                 Value existingDict;
-                dictGet(compiler->fieldAnnotations, OBJ_VAL(vm->annotationString), &existingDict);
-                dictSet(vm, compiler->fieldAnnotations, OBJ_VAL(varName), existingDict);
-                dictDelete(vm, compiler->fieldAnnotations, OBJ_VAL(vm->annotationString));
+                dictGet(compiler->fieldAnnotations,
+                        OBJ_VAL(vm->annotationString), &existingDict);
+                dictSet(vm, compiler->fieldAnnotations, OBJ_VAL(varName),
+                        existingDict);
+                dictDelete(vm, compiler->fieldAnnotations,
+                           OBJ_VAL(vm->annotationString));
 
                 hasAnnotation = false;
             }
 
-            consume(compiler, TOKEN_SEMICOLON, "Expect ';' after class variable declaration.");
+            consume(compiler, TOKEN_SEMICOLON,
+                    "Expect ';' after class variable declaration.");
         } else if (match(compiler, TOKEN_CONST)) {
             consume(compiler, TOKEN_IDENTIFIER, "Expect class constant name.");
-            uint8_t name = identifierConstant(compiler, &compiler->parser->previous);
-            consume(compiler, TOKEN_EQUAL, "Expect '=' after class constant identifier.");
+            uint8_t name =
+                identifierConstant(compiler, &compiler->parser->previous);
+            consume(compiler, TOKEN_EQUAL,
+                    "Expect '=' after class constant identifier.");
             expression(compiler);
             emitBytes(compiler, OP_SET_CLASS_VAR, name);
             emitByte(compiler, true);
 
             if (hasAnnotation) {
                 DictuVM *vm = compiler->parser->vm;
-                ObjString *varName = AS_STRING(currentChunk(compiler)->constants.values[name]);
+                ObjString *varName =
+                    AS_STRING(currentChunk(compiler)->constants.values[name]);
 
                 Value existingDict;
-                dictGet(compiler->fieldAnnotations, OBJ_VAL(vm->annotationString), &existingDict);
-                dictSet(vm, compiler->fieldAnnotations, OBJ_VAL(varName), existingDict);
-                dictDelete(vm, compiler->fieldAnnotations, OBJ_VAL(vm->annotationString));
+                dictGet(compiler->fieldAnnotations,
+                        OBJ_VAL(vm->annotationString), &existingDict);
+                dictSet(vm, compiler->fieldAnnotations, OBJ_VAL(varName),
+                        existingDict);
+                dictDelete(vm, compiler->fieldAnnotations,
+                           OBJ_VAL(vm->annotationString));
 
                 hasAnnotation = false;
             }
 
-            consume(compiler, TOKEN_SEMICOLON, "Expect ';' after class constant declaration.");
+            consume(compiler, TOKEN_SEMICOLON,
+                    "Expect ';' after class constant declaration.");
         } else if (match(compiler, TOKEN_AT)) {
             hasAnnotation = true;
             if (isFieldAnnotation(compiler)) {
@@ -1966,14 +2145,22 @@ static void parseClassBody(Compiler *compiler) {
             if (match(compiler, TOKEN_PRIVATE)) {
                 if (match(compiler, TOKEN_IDENTIFIER)) {
                     if (check(compiler, TOKEN_SEMICOLON)) {
-                        uint8_t name = identifierConstant(compiler, &compiler->parser->previous);
-                        consume(compiler, TOKEN_SEMICOLON, "Expect ';' after private variable declaration.");
-                        tableSet(compiler->parser->vm, &compiler->class->privateVariables,
-                                 AS_STRING(currentChunk(compiler)->constants.values[name]), EMPTY_VAL);
+                        uint8_t name = identifierConstant(
+                            compiler, &compiler->parser->previous);
+                        consume(
+                            compiler, TOKEN_SEMICOLON,
+                            "Expect ';' after private variable declaration.");
+                        tableSet(
+                            compiler->parser->vm,
+                            &compiler->class->privateVariables,
+                            AS_STRING(
+                                currentChunk(compiler)->constants.values[name]),
+                            EMPTY_VAL);
                         continue;
                     }
 
-                    method(compiler, true, &compiler->parser->previous, &hasAnnotation);
+                    method(compiler, true, &compiler->parser->previous,
+                           &hasAnnotation);
                     continue;
                 }
 
@@ -1991,7 +2178,14 @@ static void parseClassBody(Compiler *compiler) {
 
 static void classDeclaration(Compiler *compiler) {
     consume(compiler, TOKEN_IDENTIFIER, "Expect class name.");
-    uint8_t nameConstant = identifierConstant(compiler, &compiler->parser->previous);
+    {
+        void *d[3] = {&(compiler->parser->previous.start),
+                      &(compiler->parser->previous.length), NULL};
+        emitExternalAstEvent(compiler, AST_DECLARE_CLASS, d,
+                             compiler->parser->previous.line);
+    }
+    uint8_t nameConstant =
+        identifierConstant(compiler, &compiler->parser->previous);
     declareVariable(compiler, &compiler->parser->previous);
 
     ClassCompiler classCompiler;
@@ -2018,6 +2212,9 @@ static void classDeclaration(Compiler *compiler) {
 
     consume(compiler, TOKEN_RIGHT_BRACE, "Expect '}' after class body.");
 
+    emitExternalAstEvent(compiler, AST_END, NULL,
+                         compiler->parser->previous.line);
+
     if (classCompiler.hasSuperclass) {
         endScope(compiler);
 
@@ -2032,8 +2229,16 @@ static void classDeclaration(Compiler *compiler) {
 static void abstractClassDeclaration(Compiler *compiler) {
     consume(compiler, TOKEN_CLASS, "Expect class keyword after abstract.");
 
-    consume(compiler, TOKEN_IDENTIFIER, "Expect class name after class keyword.");
-    uint8_t nameConstant = identifierConstant(compiler, &compiler->parser->previous);
+    consume(compiler, TOKEN_IDENTIFIER,
+            "Expect class name after class keyword.");
+    {
+        void *d[3] = {&(compiler->parser->previous.start),
+                      &(compiler->parser->previous.length), NULL};
+        emitExternalAstEvent(compiler, AST_DECLARE_CLASS_ABSTRACT, d,
+                             compiler->parser->previous.line);
+    }
+    uint8_t nameConstant =
+        identifierConstant(compiler, &compiler->parser->previous);
     declareVariable(compiler, &compiler->parser->previous);
 
     ClassCompiler classCompiler;
@@ -2059,6 +2264,8 @@ static void abstractClassDeclaration(Compiler *compiler) {
     parseClassBody(compiler);
 
     consume(compiler, TOKEN_RIGHT_BRACE, "Expect '}' after class body.");
+    emitExternalAstEvent(compiler, AST_END, NULL,
+                         compiler->parser->previous.line);
 
     if (classCompiler.hasSuperclass) {
         endScope(compiler);
@@ -2070,7 +2277,15 @@ static void abstractClassDeclaration(Compiler *compiler) {
 
 static void traitDeclaration(Compiler *compiler) {
     consume(compiler, TOKEN_IDENTIFIER, "Expect trait name.");
-    uint8_t nameConstant = identifierConstant(compiler, &compiler->parser->previous);
+    {
+        void *d[3] = {&(compiler->parser->previous.start),
+                      &(compiler->parser->previous.length), NULL};
+        emitExternalAstEvent(compiler, AST_DECLARE_TRAIT, d,
+                             compiler->parser->previous.line);
+    }
+    uint8_t nameConstant =
+        identifierConstant(compiler, &compiler->parser->previous);
+
     declareVariable(compiler, &compiler->parser->previous);
 
     ClassCompiler classCompiler;
@@ -2084,6 +2299,8 @@ static void traitDeclaration(Compiler *compiler) {
     parseClassBody(compiler);
 
     consume(compiler, TOKEN_RIGHT_BRACE, "Expect '}' after trait body.");
+    emitExternalAstEvent(compiler, AST_END, NULL,
+                         compiler->parser->previous.line);
 
     defineVariable(compiler, nameConstant, false);
     endClassCompiler(compiler, &classCompiler);
@@ -2092,10 +2309,17 @@ static void traitDeclaration(Compiler *compiler) {
 static void enumDeclaration(Compiler *compiler) {
     consume(compiler, TOKEN_IDENTIFIER, "Expect enum name.");
 
-    uint8_t nameConstant = identifierConstant(compiler, &compiler->parser->previous);
+    uint8_t nameConstant =
+        identifierConstant(compiler, &compiler->parser->previous);
     declareVariable(compiler, &compiler->parser->previous);
 
     emitBytes(compiler, OP_ENUM, nameConstant);
+    {
+        void *d[3] = {&(compiler->parser->previous.start),
+                      &(compiler->parser->previous.length), NULL};
+        emitExternalAstEvent(compiler, AST_DECLARE_ENUM, d,
+                             compiler->parser->previous.line);
+    }
 
     consume(compiler, TOKEN_LEFT_BRACE, "Expect '{' before enum body.");
 
@@ -2107,8 +2331,14 @@ static void enumDeclaration(Compiler *compiler) {
         }
 
         consume(compiler, TOKEN_IDENTIFIER, "Expect enum value identifier.");
-        uint8_t name = identifierConstant(compiler, &compiler->parser->previous);
-
+        uint8_t name =
+            identifierConstant(compiler, &compiler->parser->previous);
+        {
+            void *d[3] = {&(compiler->parser->previous.start),
+                          &(compiler->parser->previous.length), NULL};
+            emitExternalAstEvent(compiler, AST_ENUM_VALUE, d,
+                                 compiler->parser->previous.line);
+        }
         if (match(compiler, TOKEN_EQUAL)) {
             expression(compiler);
         } else {
@@ -2120,13 +2350,28 @@ static void enumDeclaration(Compiler *compiler) {
     } while (match(compiler, TOKEN_COMMA));
 
     consume(compiler, TOKEN_RIGHT_BRACE, "Expect '}' after enum body.");
+    {
+        emitExternalAstEvent(compiler, AST_END, NULL,
+                             compiler->parser->previous.line);
+    }
     defineVariable(compiler, nameConstant, false);
 }
 
 static void funDeclaration(Compiler *compiler) {
     uint8_t global = parseVariable(compiler, "Expect function name.", false);
+    {
+        void *d[3] = {&(compiler->parser->previous.start),
+                      &(compiler->parser->previous.length), NULL};
+        emitExternalAstEvent(compiler, AST_DECLARE_FUNCTION, d,
+                             compiler->parser->previous.line);
+    }
+
     function(compiler, TYPE_FUNCTION, ACCESS_PUBLIC);
     defineVariable(compiler, global, false);
+    {
+        emitExternalAstEvent(compiler, AST_END, NULL,
+                             compiler->parser->previous.line);
+    }
 }
 
 static void varDeclaration(Compiler *compiler, bool constant) {
@@ -2136,11 +2381,19 @@ static void varDeclaration(Compiler *compiler, bool constant) {
 
         do {
             consume(compiler, TOKEN_IDENTIFIER, "Expect variable name.");
+            {
+                void *d[3] = {&(compiler->parser->previous.start),
+                              &(compiler->parser->previous.length), NULL};
+                emitExternalAstEvent(
+                    compiler, constant ? AST_DECLARE_CONST : AST_DECLARE_VAR, d,
+                    compiler->parser->previous.line);
+            }
             variables[varCount] = compiler->parser->previous;
             varCount++;
         } while (match(compiler, TOKEN_COMMA));
 
-        consume(compiler, TOKEN_RIGHT_BRACKET, "Expect ']' after list destructure.");
+        consume(compiler, TOKEN_RIGHT_BRACKET,
+                "Expect ']' after list destructure.");
         consume(compiler, TOKEN_EQUAL, "Expect '=' after list destructure.");
 
         expression(compiler);
@@ -2149,7 +2402,8 @@ static void varDeclaration(Compiler *compiler, bool constant) {
 
         if (compiler->scopeDepth == 0) {
             for (int i = varCount - 1; i >= 0; --i) {
-                uint8_t identifier = identifierConstant(compiler, &variables[i]);
+                uint8_t identifier =
+                    identifierConstant(compiler, &variables[i]);
                 defineVariable(compiler, identifier, constant);
             }
         } else {
@@ -2160,8 +2414,15 @@ static void varDeclaration(Compiler *compiler, bool constant) {
         }
     } else {
         do {
-            uint8_t global = parseVariable(compiler, "Expect variable name.", constant);
-
+            uint8_t global =
+                parseVariable(compiler, "Expect variable name.", constant);
+            {
+                void *d[3] = {&(compiler->parser->previous.start),
+                              &(compiler->parser->previous.length), NULL};
+                emitExternalAstEvent(
+                    compiler, constant ? AST_DECLARE_CONST : AST_DECLARE_VAR, d,
+                    compiler->parser->previous.line);
+            }
             if (match(compiler, TOKEN_EQUAL) || constant) {
                 // Compile the initializer.
                 expression(compiler);
@@ -2174,7 +2435,8 @@ static void varDeclaration(Compiler *compiler, bool constant) {
         } while (match(compiler, TOKEN_COMMA));
     }
 
-    consume(compiler, TOKEN_SEMICOLON, "Expect ';' after variable declaration.");
+    consume(compiler, TOKEN_SEMICOLON,
+            "Expect ';' after variable declaration.");
 }
 
 static void expressionStatement(Compiler *compiler) {
@@ -2190,7 +2452,8 @@ static void expressionStatement(Compiler *compiler) {
 
     expression(compiler);
     consume(compiler, TOKEN_SEMICOLON, "Expect ';' after expression.");
-    if (compiler->parser->vm->repl && t != TOKEN_EQUAL && compiler->type == TYPE_TOP_LEVEL) {
+    if (compiler->parser->vm->repl && t != TOKEN_EQUAL &&
+        compiler->type == TYPE_TOP_LEVEL) {
         emitByte(compiler, OP_POP_REPL);
     } else {
         emitByte(compiler, OP_POP);
@@ -2199,106 +2462,106 @@ static void expressionStatement(Compiler *compiler) {
 
 static int getArgCount(uint8_t *code, const ValueArray constants, int ip) {
     switch (code[ip]) {
-        case OP_NIL:
-        case OP_TRUE:
-        case OP_FALSE:
-        case OP_SUBSCRIPT:
-        case OP_SUBSCRIPT_ASSIGN:
-        case OP_SUBSCRIPT_PUSH:
-        case OP_SLICE:
-        case OP_POP:
-        case OP_EQUAL:
-        case OP_GREATER:
-        case OP_LESS:
-        case OP_ADD:
-        case OP_SUBTRACT:
-        case OP_MULTIPLY:
-        case OP_DIVIDE:
-        case OP_POW:
-        case OP_MOD:
-        case OP_NOT:
-        case OP_NEGATE:
-        case OP_CLOSE_UPVALUE:
-        case OP_RETURN:
-        case OP_EMPTY:
-        case OP_END_CLASS:
-        case OP_IMPORT_VARIABLE:
-        case OP_IMPORT_END:
-        case OP_USE:
-        case OP_OPEN_FILE:
-        case OP_BREAK:
-        case OP_BITWISE_AND:
-        case OP_BITWISE_XOR:
-        case OP_BITWISE_OR:
-        case OP_POP_REPL:
-            return 0;
+    case OP_NIL:
+    case OP_TRUE:
+    case OP_FALSE:
+    case OP_SUBSCRIPT:
+    case OP_SUBSCRIPT_ASSIGN:
+    case OP_SUBSCRIPT_PUSH:
+    case OP_SLICE:
+    case OP_POP:
+    case OP_EQUAL:
+    case OP_GREATER:
+    case OP_LESS:
+    case OP_ADD:
+    case OP_SUBTRACT:
+    case OP_MULTIPLY:
+    case OP_DIVIDE:
+    case OP_POW:
+    case OP_MOD:
+    case OP_NOT:
+    case OP_NEGATE:
+    case OP_CLOSE_UPVALUE:
+    case OP_RETURN:
+    case OP_EMPTY:
+    case OP_END_CLASS:
+    case OP_IMPORT_VARIABLE:
+    case OP_IMPORT_END:
+    case OP_USE:
+    case OP_OPEN_FILE:
+    case OP_BREAK:
+    case OP_BITWISE_AND:
+    case OP_BITWISE_XOR:
+    case OP_BITWISE_OR:
+    case OP_POP_REPL:
+        return 0;
 
-        case OP_CONSTANT:
-        case OP_UNPACK_LIST:
-        case OP_GET_LOCAL:
-        case OP_SET_LOCAL:
-        case OP_GET_GLOBAL:
-        case OP_GET_MODULE:
-        case OP_DEFINE_MODULE:
-        case OP_SET_MODULE:
-        case OP_GET_UPVALUE:
-        case OP_SET_UPVALUE:
-        case OP_GET_ATTRIBUTE:
-        case OP_GET_PRIVATE_ATTRIBUTE:
-        case OP_GET_ATTRIBUTE_NO_POP:
-        case OP_GET_PRIVATE_ATTRIBUTE_NO_POP:
-        case OP_SET_ATTRIBUTE:
-        case OP_SET_PRIVATE_ATTRIBUTE:
-        case OP_SET_CLASS_VAR:
-        case OP_SET_INIT_ATTRIBUTES:
-        case OP_SET_PRIVATE_INIT_ATTRIBUTES:
-        case OP_GET_SUPER:
-        case OP_METHOD:
-        case OP_IMPORT:
-        case OP_NEW_LIST:
-        case OP_NEW_DICT:
-        case OP_CLOSE_FILE:
-        case OP_MULTI_CASE:
-        case OP_DEFINE_CLASS_ANNOTATIONS:
-        case OP_DEFINE_METHOD_ANNOTATIONS:
-        case OP_DEFINE_FIELD_ANNOTATIONS:
-            return 1;
+    case OP_CONSTANT:
+    case OP_UNPACK_LIST:
+    case OP_GET_LOCAL:
+    case OP_SET_LOCAL:
+    case OP_GET_GLOBAL:
+    case OP_GET_MODULE:
+    case OP_DEFINE_MODULE:
+    case OP_SET_MODULE:
+    case OP_GET_UPVALUE:
+    case OP_SET_UPVALUE:
+    case OP_GET_ATTRIBUTE:
+    case OP_GET_PRIVATE_ATTRIBUTE:
+    case OP_GET_ATTRIBUTE_NO_POP:
+    case OP_GET_PRIVATE_ATTRIBUTE_NO_POP:
+    case OP_SET_ATTRIBUTE:
+    case OP_SET_PRIVATE_ATTRIBUTE:
+    case OP_SET_CLASS_VAR:
+    case OP_SET_INIT_ATTRIBUTES:
+    case OP_SET_PRIVATE_INIT_ATTRIBUTES:
+    case OP_GET_SUPER:
+    case OP_METHOD:
+    case OP_IMPORT:
+    case OP_NEW_LIST:
+    case OP_NEW_DICT:
+    case OP_CLOSE_FILE:
+    case OP_MULTI_CASE:
+    case OP_DEFINE_CLASS_ANNOTATIONS:
+    case OP_DEFINE_METHOD_ANNOTATIONS:
+    case OP_DEFINE_FIELD_ANNOTATIONS:
+        return 1;
 
-        case OP_DEFINE_OPTIONAL:
-        case OP_JUMP:
-        case OP_COMPARE_JUMP:
-        case OP_JUMP_IF_NIL:
-        case OP_JUMP_IF_FALSE:
-        case OP_LOOP:
-        case OP_CLASS:
-        case OP_SUBCLASS:
-        case OP_IMPORT_BUILTIN:
-        case OP_CALL:
-            return 2;
+    case OP_DEFINE_OPTIONAL:
+    case OP_JUMP:
+    case OP_COMPARE_JUMP:
+    case OP_JUMP_IF_NIL:
+    case OP_JUMP_IF_FALSE:
+    case OP_LOOP:
+    case OP_CLASS:
+    case OP_SUBCLASS:
+    case OP_IMPORT_BUILTIN:
+    case OP_CALL:
+        return 2;
 
-        case OP_INVOKE:
-        case OP_INVOKE_INTERNAL:
-        case OP_SUPER:
-            return 3;
+    case OP_INVOKE:
+    case OP_INVOKE_INTERNAL:
+    case OP_SUPER:
+        return 3;
 
-        case OP_IMPORT_BUILTIN_VARIABLE: {
-            int argCount = code[ip + 2];
+    case OP_IMPORT_BUILTIN_VARIABLE: {
+        int argCount = code[ip + 2];
 
-            return 2 + argCount;
-        }
+        return 2 + argCount;
+    }
 
-        case OP_CLOSURE: {
-            int constant = code[ip + 1];
-            ObjFunction* loadedFn = AS_FUNCTION(constants.values[constant]);
+    case OP_CLOSURE: {
+        int constant = code[ip + 1];
+        ObjFunction *loadedFn = AS_FUNCTION(constants.values[constant]);
 
-            // There is one byte for the constant, then two for each upvalue.
-            return 1 + (loadedFn->upvalueCount * 2);
-        }
+        // There is one byte for the constant, then two for each upvalue.
+        return 1 + (loadedFn->upvalueCount * 2);
+    }
 
-        case OP_IMPORT_FROM: {
-            // 1 + amount of variables imported
-            return 1 + code[ip + 1];
-        }
+    case OP_IMPORT_FROM: {
+        // 1 + amount of variables imported
+        return 1 + code[ip + 1];
+    }
     }
 
     return 0;
@@ -2317,7 +2580,8 @@ static void endLoop(Compiler *compiler) {
             patchJump(compiler, i + 1);
             i += 3;
         } else {
-            i += 1 + getArgCount(compiler->function->chunk.code, compiler->function->chunk.constants, i);
+            i += 1 + getArgCount(compiler->function->chunk.code,
+                                 compiler->function->chunk.constants, i);
         }
     }
 
@@ -2338,6 +2602,7 @@ static void forStatement(Compiler *compiler) {
     //   print i;                  |     |
     //   goto increment;  ---------+-----'
     // exit:                    <--'
+    emitExternalAstEvent(compiler, AST_FOR_LOOP, NULL, compiler->parser->current.line);
 
     // Create a scope for the loop variable.
     beginScope(compiler);
@@ -2410,12 +2675,9 @@ static void breakStatement(Compiler *compiler) {
     for (int i = compiler->localCount - 1;
          i >= 0 && compiler->locals[i].depth > compiler->loop->scopeDepth;
          i--) {
-        if(compiler->locals[i].isUpvalue)
-        {
+        if (compiler->locals[i].isUpvalue) {
             emitByte(compiler, OP_CLOSE_UPVALUE);
-        }
-        else
-        {
+        } else {
             emitByte(compiler, OP_POP);
         }
     }
@@ -2434,12 +2696,9 @@ static void continueStatement(Compiler *compiler) {
     for (int i = compiler->localCount - 1;
          i >= 0 && compiler->locals[i].depth > compiler->loop->scopeDepth;
          i--) {
-        if(compiler->locals[i].isUpvalue)
-        {
+        if (compiler->locals[i].isUpvalue) {
             emitByte(compiler, OP_CLOSE_UPVALUE);
-        }
-        else
-        {
+        } else {
             emitByte(compiler, OP_POP);
         }
     }
@@ -2448,6 +2707,7 @@ static void continueStatement(Compiler *compiler) {
     emitLoop(compiler, compiler->loop->start);
 }
 static void ifStatement(Compiler *compiler) {
+    emitExternalAstEvent(compiler, AST_BRANCH, NULL, compiler->parser->current.line);
     consume(compiler, TOKEN_LEFT_PAREN, "Expect '(' after 'if'.");
     expression(compiler);
     consume(compiler, TOKEN_RIGHT_PAREN, "Expect ')' after condition.");
@@ -2466,7 +2726,8 @@ static void ifStatement(Compiler *compiler) {
     patchJump(compiler, elseJump);
     emitByte(compiler, OP_POP); // Condition.
 
-    if (match(compiler, TOKEN_ELSE)) statement(compiler);
+    if (match(compiler, TOKEN_ELSE))
+        statement(compiler);
 
     patchJump(compiler, endJump);
 }
@@ -2483,38 +2744,40 @@ static void switchStatement(Compiler *compiler) {
     do {
         expression(compiler);
         int multipleCases = 0;
-        if(match(compiler, TOKEN_COMMA)) {
+        if (match(compiler, TOKEN_COMMA)) {
             do {
                 multipleCases++;
                 expression(compiler);
-            } while(match(compiler, TOKEN_COMMA));
+            } while (match(compiler, TOKEN_COMMA));
             emitBytes(compiler, OP_MULTI_CASE, multipleCases);
         }
         int compareJump = emitJump(compiler, OP_COMPARE_JUMP);
         consume(compiler, TOKEN_COLON, "Expect ':' after expression.");
         statement(compiler);
-        caseEnds[caseCount++] = emitJump(compiler,OP_JUMP);
+        caseEnds[caseCount++] = emitJump(compiler, OP_JUMP);
         patchJump(compiler, compareJump);
         if (caseCount > 255) {
-            errorAtCurrent(compiler->parser, "Switch statement can not have more than 256 case blocks");
+            errorAtCurrent(
+                compiler->parser,
+                "Switch statement can not have more than 256 case blocks");
         }
 
-    } while(match(compiler, TOKEN_CASE));
+    } while (match(compiler, TOKEN_CASE));
 
     emitByte(compiler, OP_POP); // expression.
-    if (match(compiler,TOKEN_DEFAULT)){
+    if (match(compiler, TOKEN_DEFAULT)) {
         consume(compiler, TOKEN_COLON, "Expect ':' after default.");
         statement(compiler);
     }
 
-    if (match(compiler,TOKEN_CASE)){
+    if (match(compiler, TOKEN_CASE)) {
         error(compiler->parser, "Unexpected case after default");
     }
 
     consume(compiler, TOKEN_RIGHT_BRACE, "Expect '}' after switch body.");
 
     for (int i = 0; i < caseCount; i++) {
-    	patchJump(compiler, caseEnds[i]);
+        patchJump(compiler, caseEnds[i]);
     }
 }
 
@@ -2564,7 +2827,8 @@ static void returnStatement(Compiler *compiler) {
         emitReturn(compiler);
     } else {
         if (compiler->type == TYPE_INITIALIZER) {
-            error(compiler->parser, "Cannot return a value from an initializer.");
+            error(compiler->parser,
+                  "Cannot return a value from an initializer.");
         }
 
         expression(compiler);
@@ -2577,31 +2841,47 @@ static void returnStatement(Compiler *compiler) {
 
 static void importStatement(Compiler *compiler) {
     if (match(compiler, TOKEN_STRING)) {
-        int importConstant = makeConstant(compiler, OBJ_VAL(copyString(
-                compiler->parser->vm,
-                compiler->parser->previous.start + 1,
-                compiler->parser->previous.length - 2)));
-
+        int importConstant = makeConstant(
+            compiler,
+            OBJ_VAL(copyString(compiler->parser->vm,
+                               compiler->parser->previous.start + 1,
+                               compiler->parser->previous.length - 2)));
+        {
+            const char *str = compiler->parser->previous.start + 1;
+            int l = compiler->parser->previous.length - 2;
+            int t = 1;
+            void *d[4] = {&(str), &l, &t, NULL};
+            emitExternalAstEvent(compiler, AST_IMPORT, d,
+                                 compiler->parser->previous.line);
+        }
         emitBytes(compiler, OP_IMPORT, importConstant);
         emitByte(compiler, OP_POP);
 
         if (match(compiler, TOKEN_AS)) {
-            uint8_t importName = parseVariable(compiler, "Expect import alias.", false);
+            uint8_t importName =
+                parseVariable(compiler, "Expect import alias.", false);
             emitByte(compiler, OP_IMPORT_VARIABLE);
             defineVariable(compiler, importName, false);
         }
     } else {
         consume(compiler, TOKEN_IDENTIFIER, "Expect import identifier.");
-        uint8_t importName = identifierConstant(compiler, &compiler->parser->previous);
+        uint8_t importName =
+            identifierConstant(compiler, &compiler->parser->previous);
         declareVariable(compiler, &compiler->parser->previous);
+        {
 
+            int t = 0;
+            void *d[4] = {&compiler->parser->previous.start,
+                          &compiler->parser->previous.length, &t, NULL};
+            emitExternalAstEvent(compiler, AST_IMPORT, d,
+                                 compiler->parser->previous.line);
+        }
         bool dictuSource = false;
 
-        int index = findBuiltinModule(
-            (char *) compiler->parser->previous.start,
-            compiler->parser->previous.length - compiler->parser->current.length,
-            &dictuSource
-        );
+        int index = findBuiltinModule((char *)compiler->parser->previous.start,
+                                      compiler->parser->previous.length -
+                                          compiler->parser->current.length,
+                                      &dictuSource);
 
         if (index == -1) {
             error(compiler->parser, "Unknown module");
@@ -2624,10 +2904,11 @@ static void importStatement(Compiler *compiler) {
 
 static void fromImportStatement(Compiler *compiler) {
     if (match(compiler, TOKEN_STRING)) {
-        int importConstant = makeConstant(compiler, OBJ_VAL(copyString(
-                compiler->parser->vm,
-                compiler->parser->previous.start + 1,
-                compiler->parser->previous.length - 2)));
+        int importConstant = makeConstant(
+            compiler,
+            OBJ_VAL(copyString(compiler->parser->vm,
+                               compiler->parser->previous.start + 1,
+                               compiler->parser->previous.length - 2)));
 
         consume(compiler, TOKEN_IMPORT, "Expect 'import' after import path.");
         emitBytes(compiler, OP_IMPORT, importConstant);
@@ -2640,7 +2921,8 @@ static void fromImportStatement(Compiler *compiler) {
         do {
             consume(compiler, TOKEN_IDENTIFIER, "Expect variable name.");
             tokens[varCount] = compiler->parser->previous;
-            variables[varCount] = identifierConstant(compiler, &compiler->parser->previous);
+            variables[varCount] =
+                identifierConstant(compiler, &compiler->parser->previous);
             varCount++;
 
             if (varCount > 255) {
@@ -2668,15 +2950,14 @@ static void fromImportStatement(Compiler *compiler) {
         }
     } else {
         consume(compiler, TOKEN_IDENTIFIER, "Expect import identifier.");
-        uint8_t importName = identifierConstant(compiler, &compiler->parser->previous);
+        uint8_t importName =
+            identifierConstant(compiler, &compiler->parser->previous);
 
         bool dictuSource;
 
-        int index = findBuiltinModule(
-                (char *) compiler->parser->previous.start,
-                compiler->parser->previous.length,
-                &dictuSource
-        );
+        int index =
+            findBuiltinModule((char *)compiler->parser->previous.start,
+                              compiler->parser->previous.length, &dictuSource);
 
         consume(compiler, TOKEN_IMPORT, "Expect 'import' after identifier");
 
@@ -2691,7 +2972,8 @@ static void fromImportStatement(Compiler *compiler) {
         do {
             consume(compiler, TOKEN_IDENTIFIER, "Expect variable name.");
             tokens[varCount] = compiler->parser->previous;
-            variables[varCount] = identifierConstant(compiler, &compiler->parser->previous);
+            variables[varCount] =
+                identifierConstant(compiler, &compiler->parser->previous);
             varCount++;
 
             if (varCount > 255) {
@@ -2732,6 +3014,7 @@ static void whileStatement(Compiler *compiler) {
     loop.scopeDepth = compiler->scopeDepth;
     loop.enclosing = compiler->loop;
     compiler->loop = &loop;
+    emitExternalAstEvent(compiler, AST_WHILE_LOOP, NULL, compiler->parser->current.line);
 
     if (check(compiler, TOKEN_LEFT_BRACE)) {
         emitByte(compiler, OP_TRUE);
@@ -2754,21 +3037,21 @@ static void whileStatement(Compiler *compiler) {
     endLoop(compiler);
 }
 
-static void unpackListStatement(Compiler *compiler){
+static void unpackListStatement(Compiler *compiler) {
     int varCount = 0;
     LangToken variables[255];
-    LangToken previous=compiler->parser->previous;
+    LangToken previous = compiler->parser->previous;
     do {
-        if(!check(compiler,TOKEN_IDENTIFIER)){
-            if(varCount>0){
+        if (!check(compiler, TOKEN_IDENTIFIER)) {
+            if (varCount > 0) {
                 recede(compiler->parser);
             }
-            int varsAndCommas=varCount+(varCount-1);
-            for(int var=0;var<varsAndCommas;var++){
+            int varsAndCommas = varCount + (varCount - 1);
+            for (int var = 0; var < varsAndCommas; var++) {
                 recede(compiler->parser);
             }
             recede(compiler->parser);
-            compiler->parser->current=previous;
+            compiler->parser->current = previous;
             expressionStatement(compiler);
             return;
         }
@@ -2777,16 +3060,17 @@ static void unpackListStatement(Compiler *compiler){
         varCount++;
     } while (match(compiler, TOKEN_COMMA));
 
-    consume(compiler, TOKEN_RIGHT_BRACKET, "Expect ']' after list destructure.");
+    consume(compiler, TOKEN_RIGHT_BRACKET,
+            "Expect ']' after list destructure.");
 
-    if(!check(compiler, TOKEN_EQUAL)){
+    if (!check(compiler, TOKEN_EQUAL)) {
         recede(compiler->parser);
-        int varsAndCommas=varCount+(varCount-1);
-        for(int var=0;var<varsAndCommas;var++){
-                recede(compiler->parser);
+        int varsAndCommas = varCount + (varCount - 1);
+        for (int var = 0; var < varsAndCommas; var++) {
+            recede(compiler->parser);
         }
         recede(compiler->parser);
-        compiler->parser->current=previous;
+        compiler->parser->current = previous;
         expressionStatement(compiler);
         return;
     }
@@ -2797,54 +3081,55 @@ static void unpackListStatement(Compiler *compiler){
 
     emitBytes(compiler, OP_UNPACK_LIST, varCount);
 
-
-    for(int i=varCount-1;i>-1;i--){
-        LangToken token=variables[i];
+    for (int i = varCount - 1; i > -1; i--) {
+        LangToken token = variables[i];
 
         uint8_t setOp;
         int arg = resolveLocal(compiler, &token, false);
         if (arg != -1) {
-                setOp = OP_SET_LOCAL;
+            setOp = OP_SET_LOCAL;
         } else if ((arg = resolveUpvalue(compiler, &token)) != -1) {
-                setOp = OP_SET_UPVALUE;
+            setOp = OP_SET_UPVALUE;
         } else {
-                arg = identifierConstant(compiler, &token);
-                setOp = OP_SET_MODULE;
+            arg = identifierConstant(compiler, &token);
+            setOp = OP_SET_MODULE;
         }
         checkConst(compiler, setOp, arg);
-        emitBytes(compiler, setOp, (uint8_t) arg);
+        emitBytes(compiler, setOp, (uint8_t)arg);
         emitByte(compiler, OP_POP);
     }
 
-    consume(compiler, TOKEN_SEMICOLON, "Expect ';' after variable declaration.");
+    consume(compiler, TOKEN_SEMICOLON,
+            "Expect ';' after variable declaration.");
 }
 
 static void synchronize(Parser *parser) {
     parser->panicMode = false;
 
     while (parser->current.type != TOKEN_EOF) {
-        if (parser->previous.type == TOKEN_SEMICOLON) return;
+        if (parser->previous.type == TOKEN_SEMICOLON)
+            return;
 
         switch (parser->current.type) {
-            case TOKEN_CLASS:
-            case TOKEN_TRAIT:
-            case TOKEN_DEF:
-            case TOKEN_STATIC:
-            case TOKEN_VAR:
-            case TOKEN_CONST:
-            case TOKEN_FOR:
-            case TOKEN_IF:
-            case TOKEN_SWITCH:
-            case TOKEN_WHILE:
-            case TOKEN_BREAK:
-            case TOKEN_RETURN:
-            case TOKEN_IMPORT:
-            case TOKEN_WITH:
-                return;
+        case TOKEN_CLASS:
+        case TOKEN_TRAIT:
+        case TOKEN_DEF:
+        case TOKEN_STATIC:
+        case TOKEN_VAR:
+        case TOKEN_CONST:
+        case TOKEN_FOR:
+        case TOKEN_IF:
+        case TOKEN_SWITCH:
+        case TOKEN_WHILE:
+        case TOKEN_BREAK:
+        case TOKEN_RETURN:
+        case TOKEN_IMPORT:
+        case TOKEN_WITH:
+            return;
 
-            default:
-                // Do nothing.
-                ;
+        default:
+            // Do nothing.
+            ;
         }
 
         advance(parser);
@@ -2854,7 +3139,8 @@ static void synchronize(Parser *parser) {
 static void declaration(Compiler *compiler) {
     if (match(compiler, TOKEN_CLASS)) {
         classDeclaration(compiler);
-        if (compiler->parser->panicMode) synchronize(compiler->parser);
+        if (compiler->parser->panicMode)
+            synchronize(compiler->parser);
         return;
     }
 
@@ -2876,7 +3162,8 @@ static void declaration(Compiler *compiler) {
         statement(compiler);
     }
 
-    if (compiler->parser->panicMode) synchronize(compiler->parser);
+    if (compiler->parser->panicMode)
+        synchronize(compiler->parser);
 }
 
 static void statement(Compiler *compiler) {
@@ -2919,7 +3206,8 @@ static void statement(Compiler *compiler) {
         }
 
         if (check(compiler, TOKEN_COLON)) {
-            for (int i = 0; i < parser->current.length + parser->previous.length; ++i) {
+            for (int i = 0;
+                 i < parser->current.length + parser->previous.length; ++i) {
                 backTrack(&parser->scanner);
             }
 
@@ -2953,6 +3241,8 @@ ObjFunction *compile(DictuVM *vm, ObjModule *module, const char *source) {
     parser.hadError = false;
     parser.panicMode = false;
     parser.module = module;
+    parser.externalUserData = NULL;
+    parser.externalReportErrorFunc = NULL;
 
     Scanner scanner;
     initScanner(&scanner, source);
@@ -2971,7 +3261,50 @@ ObjFunction *compile(DictuVM *vm, ObjModule *module, const char *source) {
 
     ObjFunction *function = endCompiler(&compiler);
 
-    // If we're in the repl we need the constants to live for the entirety of the execution
+    // If we're in the repl we need the constants to live for the entirety of
+    // the execution
+    if (!vm->repl) {
+        freeTable(vm, &vm->constants);
+    }
+
+    // If there was a compile error, the code is not valid, so don't
+    // create a function.
+    return parser.hadError ? NULL : function;
+}
+
+ObjFunction *
+compileExternal(DictuVM *vm, ObjModule *module, const char *source,
+                externalCompilerWriteByteDef *externalWriteBytesFunc,
+                externalErrorAt *externalReportErrorFunc, void *userData) {
+    Parser parser;
+    parser.vm = vm;
+    parser.hadError = false;
+    parser.panicMode = false;
+    parser.module = module;
+
+    Scanner scanner;
+    initScanner(&scanner, source);
+    parser.scanner = scanner;
+
+    Compiler compiler;
+    initCompiler(&parser, &compiler, NULL, TYPE_TOP_LEVEL, ACCESS_PUBLIC);
+    compiler.externalUserData = userData;
+    parser.externalUserData = userData;
+    parser.externalReportErrorFunc = externalReportErrorFunc;
+    compiler.externalWriteBytesFunc = externalWriteBytesFunc;
+
+    advance(compiler.parser);
+
+    if (!match(&compiler, TOKEN_EOF)) {
+        do {
+            declaration(&compiler);
+        } while (!match(&compiler, TOKEN_EOF));
+    }
+
+    ObjFunction *function = endCompiler(&compiler);
+
+    // If we're in the repl we need the constants to live for the entirety of
+    // the execution
     if (!vm->repl) {
         freeTable(vm, &vm->constants);
     }
@@ -2992,10 +3325,10 @@ void grayCompilerRoots(DictuVM *vm) {
             classCompiler = classCompiler->enclosing;
         }
 
-        grayObject(vm, (Obj *) compiler->classAnnotations);
-        grayObject(vm, (Obj *) compiler->methodAnnotations);
-        grayObject(vm, (Obj *) compiler->fieldAnnotations);
-        grayObject(vm, (Obj *) compiler->function);
+        grayObject(vm, (Obj *)compiler->classAnnotations);
+        grayObject(vm, (Obj *)compiler->methodAnnotations);
+        grayObject(vm, (Obj *)compiler->fieldAnnotations);
+        grayObject(vm, (Obj *)compiler->function);
         grayTable(vm, &compiler->stringConstants);
         compiler = compiler->enclosing;
     }

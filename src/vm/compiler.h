@@ -3,6 +3,7 @@
 
 #include <math.h>
 
+#include "ast_event.h"
 #include "object.h"
 #include "scanner.h"
 
@@ -81,6 +82,8 @@ typedef struct {
     bool hadError;
     bool panicMode;
     ObjModule *module;
+    void* externalReportErrorFunc;
+    void* externalUserData;
 } Parser;
 
 typedef struct Compiler {
@@ -104,7 +107,13 @@ typedef struct Compiler {
     ObjDict *classAnnotations;
     ObjDict *methodAnnotations;
     ObjDict *fieldAnnotations;
+    void* externalWriteBytesFunc;
+    void* externalUserData;
 } Compiler;
+
+typedef void externalCompilerWriteByteDef (Compiler *compiler, AstEventCode code, void** args, int line, void* userData);
+typedef void externalErrorAt (Parser *parser, LangToken *token, const char *message, void* user_data);
+
 
 typedef void (*ParsePrefixFn)(Compiler *compiler, bool canAssign);
 typedef void (*ParseInfixFn)(Compiler *compiler, LangToken previousToken, bool canAssign);
@@ -116,6 +125,7 @@ typedef struct {
 } ParseRule;
 
 ObjFunction *compile(DictuVM *vm, ObjModule *module, const char *source);
+ObjFunction *compileExternal(DictuVM *vm, ObjModule *module, const char *source, externalCompilerWriteByteDef* externalWriteBytesFunc, externalErrorAt* externalReportErrorFunc, void* user_data);
 
 void grayCompilerRoots(DictuVM *vm);
 
