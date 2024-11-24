@@ -2699,7 +2699,7 @@ static DictuInterpretResult runEventLoop(DictuVM* vm) {
             printf("%d\n", vm->frameCount);
              CallFrame current = vm->frames[vm->frameCount-1];
             vm->frames[vm->frameCount-1] = *t->frame;
-            DictuInterpretResult result = runWithBreakFrame(vm, vm->frameCount, NULL);
+            DictuInterpretResult result = runWithBreakFrame(vm, -1, NULL);
             if(result != INTERPRET_OK)
                 return result;
             if(vm->frameCount > 0)
