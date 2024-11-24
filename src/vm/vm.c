@@ -1045,6 +1045,26 @@ static void setReplVar(DictuVM *vm, Value value) {
     tableSet(vm, &vm->globals, vm->replVar, value);
 }
 
+static DictuInterpretResult asyncFreezeState(DictuVM *vm, int argCount,
+                                             CallFrame *frame,
+                                             AsyncContext *targetContext) {
+
+    Value target = pop(vm);
+    vm->stackTop -= 1 + argCount;
+    push(vm, target);
+
+    frame->slots = vm->stackTop - 4;
+    AsyncContext *ctx = copyVmState(vm);
+    if (targetContext->result)
+        ctx->result = targetContext->result;
+    ctx->breakFrame = vm->frameCount - 1;
+    ObjFuture *future = AS_FUTURE(target);
+    Task *t = createTask(vm, true);
+    t->waitFor = future;
+    t->asyncContext = ctx;
+    return INTERPRET_OK;
+}
+
 static void copyAnnotations(DictuVM *vm, ObjDict *superAnnotations,
                             ObjDict *klassAnnotations) {
     for (int i = 0; i <= superAnnotations->capacityMask; ++i) {
@@ -2411,43 +2431,13 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame,
             int argCount = READ_BYTE();
             bool unpack = READ_BYTE();
             bool await = READ_BYTE();
-            Value f = peek(vm, argCount);
             frame->ip = ip;
-            if (!callValue(vm, f, argCount, unpack, await)) {
+            if (!callValue(vm, peek(vm, argCount), argCount, unpack, await)) {
                 return INTERPRET_RUNTIME_ERROR;
             }
 
             if (await) {
-                Value target = pop(vm);
-                vm->stackTop -= 1 + argCount;
-                assert(IS_FUTURE(target));
-                assert(frame->closure->function &&
-                       frame->closure->function->async);
-
-                push(vm, target);
-
-                frame->slots = vm->stackTop - 4;
-                AsyncContext *ctx = copyVmState(vm);
-                if (targetContext->result)
-                    ctx->result = targetContext->result;
-                ctx->breakFrame = vm->frameCount - 1;
-                ObjFuture *future = AS_FUTURE(target);
-                Task *t = createTask(vm, true);
-                t->waitFor = future;
-                t->asyncContext = ctx;
-                return INTERPRET_OK;
-
-            } else {
-
-                ObjFunction *func = NULL;
-
-                if (IS_CLOSURE(f)) {
-                    func = AS_CLOSURE(f)->function;
-                } else if (IS_FUNCTION(f))
-                    func = AS_FUNCTION(f);
-                if (func && func->async) {
-                    // vm->stackTop -= 1 + argCount;
-                }
+                return asyncFreezeState(vm, argCount, frame, targetContext);
             }
             frame = &vm->frames[vm->frameCount - 1];
             ip = frame->ip;
@@ -2466,18 +2456,7 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame,
             }
 
             if (await) {
-                Value target = peek(vm, 0);
-                assert(IS_FUTURE(target));
-                assert(frame->closure->function &&
-                       frame->closure->function->async);
-                vm->stackTop = frame->slots;
-                AsyncContext *ctx = copyVmState(vm);
-                frame->ip++;
-                ObjFuture *future = AS_FUTURE(target);
-                Task *t = createTask(vm, true);
-                t->waitFor = future;
-                t->asyncContext = ctx;
-                return INTERPRET_OK;
+                return asyncFreezeState(vm, argCount, frame, targetContext);
             }
             frame = &vm->frames[vm->frameCount - 1];
             ip = frame->ip;
@@ -2496,17 +2475,7 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame,
             }
 
             if (await) {
-                Value target = peek(vm, 0);
-                assert(IS_FUTURE(target));
-                assert(frame->closure->function &&
-                       frame->closure->function->async);
-                AsyncContext *ctx = copyVmState(vm);
-                frame->ip++;
-                ObjFuture *future = AS_FUTURE(target);
-                Task *t = createTask(vm, true);
-                t->waitFor = future;
-                t->asyncContext = ctx;
-                return INTERPRET_OK;
+                return asyncFreezeState(vm, argCount, frame, targetContext);
             }
             frame = &vm->frames[vm->frameCount - 1];
             ip = frame->ip;
@@ -2584,12 +2553,11 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame,
                     ObjFuture *targetFuture = targetContext->result;
                     if (targetFuture->pending) {
                         targetFuture->pending = false;
-                        targetFuture->result = result;
+                        targetFuture->result = newResultSuccess(vm, result);
                     }
                 }
                 return INTERPRET_OK;
             }
-
             DISPATCH();
         }
 

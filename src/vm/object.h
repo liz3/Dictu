@@ -205,6 +205,7 @@ struct sObjFuture {
     Obj obj;
     bool pending;
     bool isAwait;
+    bool controlled;
     Value result;
 };
 

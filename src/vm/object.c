@@ -199,6 +199,7 @@ ObjFuture *newFuture(DictuVM* vm) {
     ObjFuture* future = ALLOCATE_OBJ(vm, ObjFuture, OBJ_FUTURE);
     future->pending = true;
     future->isAwait = false;
+    future->controlled = true;
     future->result = EMPTY_VAL;
     return future;
 }

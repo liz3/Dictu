@@ -4,6 +4,10 @@ static Value setResolved(DictuVM *vm, int argCount, Value *args) {
     if (argCount != 1)
         return EMPTY_VAL;
     ObjFuture *future = AS_FUTURE(args[0]);
+        if (future->controlled) {
+      runtimeError(vm, "Cannot resolve a controlled future.");
+      return EMPTY_VAL;
+    }
     if (!future->pending)
         return EMPTY_VAL;
     future->pending = false;
@@ -14,7 +18,15 @@ static Value setResolved(DictuVM *vm, int argCount, Value *args) {
 static Value setRejected(DictuVM *vm, int argCount, Value *args) {
     if (argCount != 1)
         return EMPTY_VAL;
+      if(!IS_STRING(args[1])){
+          runtimeError(vm, "Reject Value can only be a string.");
+          return EMPTY_VAL;
+      }
     ObjFuture *future = AS_FUTURE(args[0]);
+    if (future->controlled) {
+      runtimeError(vm, "Cannot reject a controlled future.");
+      return EMPTY_VAL;
+    }
     if (!future->pending)
         return EMPTY_VAL;
     future->pending = false;
@@ -40,7 +52,6 @@ static Value then(DictuVM *vm, int argCount, Value *args) {
         frame->closure = closure;
         frame->ip = closure->function->chunk.code;
     }
-                          // context->stackSize -= 2;
     if(vm->asyncContextInScope){
       context->ref = vm->asyncContextInScope;
       vm->asyncContextInScope->refs++;
