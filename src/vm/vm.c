@@ -350,13 +350,11 @@ AsyncContext *copyVmState(DictuVM *vm) {
     context->frameCapacity = vm->frameCapacity + 1;
     context->frames = ALLOCATE(vm, CallFrame, vm->frameCapacity + 1);
     memcpy(context->frames, vm->frames, sizeof(CallFrame) * vm->frameCount);
-    printf("stack size %ld\n", vm->stackTop - (&vm->stack[0]));
     memcpy(context->stack, vm->stack,
-           sizeof(Value) * (vm->stackTop - &vm->stack[0]));
+           sizeof(Value) * (vm->stackTop - vm->stack));
     for (int i = 0; i < context->frameCount; i++) {
         int currentOffset = vm->stackTop - &(vm->frames[i].slots[0]);
-        printf("current offset: %d %p %p\n", currentOffset, vm->frames[i].slots,
-               vm->stack);
+
         Value *ptr = context->stack;
         context->frames[i].slots = &ptr[currentOffset - 1];
     }
