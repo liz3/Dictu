@@ -2512,8 +2512,8 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame, Async
                 if(targetContext && targetContext->result ){
                     ObjFuture* targetFuture = targetContext->result;
                     if(targetFuture->pending) {
-                    targetFuture->pending = false;
-                    targetFuture->result = result;
+                        targetFuture->pending = false;
+                        targetFuture->result = result;
                     }
                 }
                 return INTERPRET_OK;
