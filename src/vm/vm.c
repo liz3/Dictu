@@ -136,15 +136,15 @@ void releaseAsyncContext(DictuVM *vm, AsyncContext *ctx) {
         vm->asyncContexts =
             SHRINK_ARRAY(vm, vm->asyncContexts, AsyncContext *,
                          vm->asyncContextCount, vm->asyncContextCount - 1);
+        vm->asyncContextCount--;
     }
-    FREE_ARRAY(vm, CallFrame, ctx->frames, vm->frameCapacity);
+    FREE_ARRAY(vm, CallFrame, ctx->frames, ctx->frameCapacity);
     while (ctx->openUpvalues != NULL) {
         ObjUpvalue *n = ctx->openUpvalues->next;
         FREE(vm, ObjUpvalue, ctx->openUpvalues);
         ctx->openUpvalues = n;
     }
     FREE(vm, AsyncContext, ctx);
-    vm->asyncContextCount--;
 }
 
 Task *createTask(DictuVM *vm, bool prepend) {
@@ -183,10 +183,10 @@ void releaseTask(DictuVM *vm, Task *ctx) {
                 vm->tasks[i - 1] = vm->tasks[i];
             }
         }
+        vm->tasks = SHRINK_ARRAY(vm, vm->tasks, Task *, vm->taskCount,
+                                 vm->taskCount - 1);
     }
     vm->taskCount--;
-    vm->tasks =
-        SHRINK_ARRAY(vm, vm->tasks, Task *, vm->taskCount + 1, vm->taskCount);
 }
 Task *popTask(DictuVM *vm, bool back) {
     if (vm->taskCount == 0)
@@ -367,7 +367,6 @@ AsyncContext *copyVmState(DictuVM *vm) {
             current = context->openUpvalues;
         } else {
             current->next = ALLOCATE(vm, ObjUpvalue, 1);
-            ;
             current = current->next;
         }
         memcpy(current, upvalue, sizeof(ObjUpvalue));

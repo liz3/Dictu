@@ -198,6 +198,7 @@ ObjFile *newFile(DictuVM *vm) {
 ObjFuture *newFuture(DictuVM* vm) {
     ObjFuture* future = ALLOCATE_OBJ(vm, ObjFuture, OBJ_FUTURE);
     future->pending = true;
+    future->isAwait = false;
     future->result = EMPTY_VAL;
     return future;
 }
