@@ -2736,13 +2736,13 @@ static DictuInterpretResult runEventLoop(DictuVM* vm) {
                     }
                     push(vm, t->waitFor->result);
                 }
-                for(Value* ptr = vm->stack; ptr < vm->stackTop; ptr++){
-                               if(ptr == NULL)
-                                break;
-                            char* vv = valueToString(*ptr);
-                    printf("%p: %s\n", ptr, vv);
-                    free(vv);
-                }
+                // for(Value* ptr = vm->stack; ptr < vm->stackTop; ptr++){
+                //                if(ptr == NULL)
+                //                 break;
+                //             char* vv = valueToString(*ptr);
+                //     printf("%p: %s\n", ptr, vv);
+                //     free(vv);
+                // }
                 //           for(Value* ptr = vm->frames[vm->frameCount-1].slots; ptr < vm->stackTop; ptr++){
                 //             if(ptr == NULL)
                 //                 break;
@@ -2760,12 +2760,7 @@ static DictuInterpretResult runEventLoop(DictuVM* vm) {
                  vm->frameCount = frameCount;
                  vm->frameCapacity = frameCapacity;
                  vm->openUpvalues = upValues;
-                // if(t->asyncContext->result && t->asyncContext->result->pending){
-                //     Task* newTask = createTask(vm, true);
-                //     newTask->asyncContext = t->asyncContext;
-                // } else{
-                //     releaseAsyncContext(vm, t->asyncContext);
-                // }
+
 
                     releaseAsyncContext(vm, t->asyncContext);
             }
