@@ -13,7 +13,6 @@ typedef struct {
     ObjClosure *closure;
     uint8_t *ip;
     Value *slots;
-    int asynContextCreated;
 } CallFrame;
 
 typedef struct asyncContext {
@@ -24,8 +23,6 @@ typedef struct asyncContext {
      int breakFrame;
      Value stack[STACK_MAX];
      int stackSize;
-     bool noPush;
-     bool needsCall;
      ObjUpvalue *openUpvalues;
      struct asyncContext* ref;
      int refs;

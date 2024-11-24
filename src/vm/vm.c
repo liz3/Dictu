@@ -445,7 +445,6 @@ static bool call(DictuVM *vm, ObjClosure *closure, int argCount, bool await) {
         frame->closure = closure;
         frame->ip = closure->function->chunk.code;
         frame->slots = (context->stack + (context->stackSize - argCount - 1));
-        frame->asynContextCreated = 0;
         push(vm, OBJ_VAL(context->result));
         Task *task = createTask(vm, false);
         task->asyncContext = context;
@@ -453,7 +452,6 @@ static bool call(DictuVM *vm, ObjClosure *closure, int argCount, bool await) {
     }
 
     CallFrame *frame = &vm->frames[vm->frameCount++];
-    frame->asynContextCreated = 0;
     frame->closure = closure;
     frame->ip = closure->function->chunk.code;
     frame->slots = vm->stackTop - argCount - 1;
@@ -2897,7 +2895,6 @@ Value callFunction(DictuVM *vm, Value function, int argCount, Value *args) {
     uint8_t code[4] = {OP_CALL, argCount, 0, OP_RETURN};
     frame->ip = code;
     frame->closure = NULL;
-    frame->asynContextCreated = 0;
     push(vm, function);
     for (int i = 0; i < argCount; i++) {
         push(vm, args[i]);
