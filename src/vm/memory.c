@@ -323,15 +323,35 @@ void collectGarbage(DictuVM *vm) {
         grayValue(vm, *slot);
     }
 
+    for (int i = 0; i < vm->asyncContextCount; i++) {
+        AsyncContext *ctx = vm->asyncContexts[i];
+        if (ctx->refs > 0) {
+            if (ctx->result)
+                grayObject(vm, (Obj *)ctx->result);
+            for (Value *slot = ctx->stack; slot < ctx->stack + ctx->stackSize;
+                 slot++) {
+                grayValue(vm, *slot);
+            }
+            for (ObjUpvalue *upvalue = ctx->openUpvalues; upvalue != NULL;
+                 upvalue = upvalue->next) {
+                grayObject(vm, (Obj *)upvalue);
+            }
+        }
+    }
+    for (int i = 0; i < vm->taskCount; i++) {
+        Task *t = vm->tasks[i];
+        if (t->waitFor)
+            grayObject(vm, (Obj *)t->waitFor);
+    }
+
     for (int i = 0; i < vm->frameCount; i++) {
-        grayObject(vm, (Obj *) vm->frames[i].closure);
+        grayObject(vm, (Obj *)vm->frames[i].closure);
     }
 
     // Mark the open upvalues.
-    for (ObjUpvalue *upvalue = vm->openUpvalues;
-         upvalue != NULL;
+    for (ObjUpvalue *upvalue = vm->openUpvalues; upvalue != NULL;
          upvalue = upvalue->next) {
-        grayObject(vm, (Obj *) upvalue);
+        grayObject(vm, (Obj *)upvalue);
     }
 
     // Mark the global roots.
@@ -349,10 +369,11 @@ void collectGarbage(DictuVM *vm) {
     grayTable(vm, &vm->instanceMethods);
     grayTable(vm, &vm->resultMethods);
     grayTable(vm, &vm->enumMethods);
+    grayTable(vm, &vm->futureMethods);
     grayCompilerRoots(vm);
-    grayObject(vm, (Obj *) vm->initString);
-    grayObject(vm, (Obj *) vm->annotationString);
-    grayObject(vm, (Obj *) vm->replVar);
+    grayObject(vm, (Obj *)vm->initString);
+    grayObject(vm, (Obj *)vm->annotationString);
+    grayObject(vm, (Obj *)vm->replVar);
 
     // Traverse the references.
     while (vm->grayCount > 0) {

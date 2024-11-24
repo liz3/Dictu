@@ -124,6 +124,7 @@ void releaseAsyncContext(DictuVM* vm, AsyncContext* ctx){
                 vm->asyncContexts[i-1] = vm->asyncContexts[i];
             }
         }
+        vm->asyncContexts = SHRINK_ARRAY(vm, vm->asyncContexts, AsyncContext*, vm->asyncContextCount,  vm->asyncContextCount-1);
     }
     FREE_ARRAY(vm, CallFrame, ctx->frames, vm->frameCapacity);
     while(ctx->openUpvalues != NULL){
@@ -170,8 +171,10 @@ void releaseTask(DictuVM* vm, Task* ctx){
                 vm->tasks[i-1] = vm->tasks[i];
             }
         }
+
     }
     vm->taskCount--;
+    vm->tasks = SHRINK_ARRAY(vm, vm->tasks, Task*, vm->taskCount+1, vm->taskCount);
 }
 Task* popTask(DictuVM* vm, bool back){
     if (vm->taskCount == 0)
