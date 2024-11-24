@@ -5,31 +5,31 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "../optionals/optionals.h"
 #include "common.h"
 #include "compiler.h"
+#include "datatypes/bool.h"
+#include "datatypes/class.h"
+#include "datatypes/dicts/dicts.h"
+#include "datatypes/enums.h"
+#include "datatypes/files.h"
 #include "datatypes/future.h"
+#include "datatypes/instance.h"
+#include "datatypes/lists/lists.h"
+#include "datatypes/nil.h"
+#include "datatypes/number.h"
+#include "datatypes/result/result.h"
+#include "datatypes/sets.h"
+#include "datatypes/strings.h"
 #include "debug.h"
-#include "object.h"
+#include "error_lib/error.h"
 #include "memory.h"
-#include "vm.h"
+#include "natives.h"
+#include "object.h"
 #include "utf8.h"
 #include "util.h"
-#include "error_lib/error.h"
-#include "datatypes/number.h"
-#include "datatypes/bool.h"
-#include "datatypes/nil.h"
-#include "datatypes/strings.h"
-#include "datatypes/lists/lists.h"
-#include "datatypes/dicts/dicts.h"
-#include "datatypes/sets.h"
-#include "datatypes/files.h"
-#include "datatypes/class.h"
-#include "datatypes/instance.h"
-#include "datatypes/result/result.h"
-#include "datatypes/enums.h"
-#include "natives.h"
-#include "../optionals/optionals.h"
 #include "value.h"
+#include "vm.h"
 
 static void resetStack(DictuVM *vm) {
     vm->stackTop = vm->stack;
@@ -38,33 +38,36 @@ static void resetStack(DictuVM *vm) {
     vm->compiler = NULL;
 }
 
-#define HANDLE_UNPACK                                                               \
-    if (unpack) {                                                                   \
-        if (!IS_LIST(peek(vm, 0))) {                                                \
-            runtimeError(vm, "Attempted to unpack a value that is not a list");     \
-            return false;                                                           \
-        }                                                                           \
-                                                                                    \
-        ObjList *list = AS_LIST(pop(vm));                                     \
-                                                                                    \
-        for (int i = 0; i < list->values.count; ++i) {                              \
-            push(vm, list->values.values[i]);                                       \
-        }                                                                           \
-                                                                                    \
-        argCount += (list->values.count - 1);                                       \
-        unpack = false;                                                             \
+#define HANDLE_UNPACK                                                          \
+    if (unpack) {                                                              \
+        if (!IS_LIST(peek(vm, 0))) {                                           \
+            runtimeError(vm,                                                   \
+                         "Attempted to unpack a value that is not a list");    \
+            return false;                                                      \
+        }                                                                      \
+                                                                               \
+        ObjList *list = AS_LIST(pop(vm));                                      \
+                                                                               \
+        for (int i = 0; i < list->values.count; ++i) {                         \
+            push(vm, list->values.values[i]);                                  \
+        }                                                                      \
+                                                                               \
+        argCount += (list->values.count - 1);                                  \
+        unpack = false;                                                        \
     }
 
-#define INSTANCE_HAS_NO_ATTR_ERR RUNTIME_ERROR("'%s' instance has no attribute: '%s'.", instance->klass->name->chars, name->chars)
+#define INSTANCE_HAS_NO_ATTR_ERR                                               \
+    RUNTIME_ERROR("'%s' instance has no attribute: '%s'.",                     \
+                  instance->klass->name->chars, name->chars)
 
 void runtimeError(DictuVM *vm, const char *format, ...) {
     for (int i = vm->frameCount - 1; i >= 0; i--) {
         CallFrame *frame = &vm->frames[i];
 
-        if(frame->closure == NULL) {
+        if (frame->closure == NULL) {
             // synthetic frame created by callFunction
             continue;
-        } 
+        }
         ObjFunction *function = frame->closure->function;
 
         // -1 because the IP is sitting on the next instruction to be
@@ -72,10 +75,14 @@ void runtimeError(DictuVM *vm, const char *format, ...) {
         size_t instruction = frame->ip - function->chunk.code - 1;
 
         if (function->name == NULL) {
-            log_error("File '%s', {bold}line %d{reset}", function->module->name->chars, function->chunk.lines[instruction]);
+            log_error("File '%s', {bold}line %d{reset}",
+                      function->module->name->chars,
+                      function->chunk.lines[instruction]);
             i = -1;
         } else {
-            log_error("Function '%s' in '%s', {bold}line %d{reset}", function->name->chars, function->module->name->chars, function->chunk.lines[instruction]);
+            log_error("Function '%s' in '%s', {bold}line %d{reset}",
+                      function->name->chars, function->module->name->chars,
+                      function->chunk.lines[instruction]);
         }
 
         log_pad("");
@@ -90,45 +97,49 @@ void runtimeError(DictuVM *vm, const char *format, ...) {
     resetStack(vm);
 }
 
-AsyncContext* createAsyncContext(DictuVM* vm){
-    if(vm->asyncContextCount == 0) {
-        vm->asyncContexts = ALLOCATE(vm, AsyncContext*, 1);
+AsyncContext *createAsyncContext(DictuVM *vm) {
+    if (vm->asyncContextCount == 0) {
+        vm->asyncContexts = ALLOCATE(vm, AsyncContext *, 1);
     } else {
-        vm->asyncContexts = GROW_ARRAY(vm, vm->asyncContexts, AsyncContext*, vm->asyncContextCount, vm->asyncContextCount+1);
+        vm->asyncContexts =
+            GROW_ARRAY(vm, vm->asyncContexts, AsyncContext *,
+                       vm->asyncContextCount, vm->asyncContextCount + 1);
     }
-    AsyncContext* ctx = ALLOCATE(vm, AsyncContext, 1);
+    AsyncContext *ctx = ALLOCATE(vm, AsyncContext, 1);
     memset(ctx, 0, sizeof(AsyncContext));
     vm->asyncContexts[vm->asyncContextCount++] = ctx;
     return ctx;
 }
-void releaseAsyncContext(DictuVM* vm, AsyncContext* ctx){
-    if(ctx->refs > 0) {
+void releaseAsyncContext(DictuVM *vm, AsyncContext *ctx) {
+    if (ctx->refs > 0) {
         return;
     } else {
-        if(ctx->ref) {
+        if (ctx->ref) {
             ctx->ref->refs--;
         }
     }
-    if(vm->asyncContextCount == 1){
-        FREE_ARRAY(vm, AsyncContext*, vm->asyncContexts, 1);
+    if (vm->asyncContextCount == 1) {
+        FREE_ARRAY(vm, AsyncContext *, vm->asyncContexts, 1);
         vm->asyncContexts = NULL;
     } else {
         bool f = false;
-        for(int i = 0; i < vm->asyncContextCount;i++){
-            if(!f){
-                if(vm->asyncContexts[i] == ctx) {
+        for (int i = 0; i < vm->asyncContextCount; i++) {
+            if (!f) {
+                if (vm->asyncContexts[i] == ctx) {
                     f = true;
                 }
             } else {
                 // shift all later one spot up
-                vm->asyncContexts[i-1] = vm->asyncContexts[i];
+                vm->asyncContexts[i - 1] = vm->asyncContexts[i];
             }
         }
-        vm->asyncContexts = SHRINK_ARRAY(vm, vm->asyncContexts, AsyncContext*, vm->asyncContextCount,  vm->asyncContextCount-1);
+        vm->asyncContexts =
+            SHRINK_ARRAY(vm, vm->asyncContexts, AsyncContext *,
+                         vm->asyncContextCount, vm->asyncContextCount - 1);
     }
     FREE_ARRAY(vm, CallFrame, ctx->frames, vm->frameCapacity);
-    while(ctx->openUpvalues != NULL){
-        ObjUpvalue* n = ctx->openUpvalues->next;
+    while (ctx->openUpvalues != NULL) {
+        ObjUpvalue *n = ctx->openUpvalues->next;
         FREE(vm, ObjUpvalue, ctx->openUpvalues);
         ctx->openUpvalues = n;
     }
@@ -136,50 +147,51 @@ void releaseAsyncContext(DictuVM* vm, AsyncContext* ctx){
     vm->asyncContextCount--;
 }
 
-Task* createTask(DictuVM* vm, bool prepend){
-    if(vm->taskCount == 0) {
-        vm->tasks = ALLOCATE(vm, Task*, 1);
+Task *createTask(DictuVM *vm, bool prepend) {
+    if (vm->taskCount == 0) {
+        vm->tasks = ALLOCATE(vm, Task *, 1);
     } else {
-        vm->tasks = GROW_ARRAY(vm, vm->tasks, Task*, vm->taskCount, vm->taskCount+1);
+        vm->tasks =
+            GROW_ARRAY(vm, vm->tasks, Task *, vm->taskCount, vm->taskCount + 1);
     }
-    Task* ctx = ALLOCATE(vm, Task, 1);
+    Task *ctx = ALLOCATE(vm, Task, 1);
     memset(ctx, 0, sizeof(Task));
-    if(prepend) {
-            for(int i = vm->taskCount-1; i >= 0; i--){
-                  vm->tasks[i+1] = vm->tasks[i];
-            }
+    if (prepend) {
+        for (int i = vm->taskCount - 1; i >= 0; i--) {
+            vm->tasks[i + 1] = vm->tasks[i];
+        }
         vm->tasks[0] = ctx;
         vm->taskCount++;
     } else {
-      vm->tasks[vm->taskCount++] = ctx;
+        vm->tasks[vm->taskCount++] = ctx;
     }
     return ctx;
 }
-void releaseTask(DictuVM* vm, Task* ctx){
-    if(vm->taskCount == 1){
-        FREE_ARRAY(vm, Task*, vm->tasks, 1);
+void releaseTask(DictuVM *vm, Task *ctx) {
+    if (vm->taskCount == 1) {
+        FREE_ARRAY(vm, Task *, vm->tasks, 1);
         vm->tasks = NULL;
     } else {
         bool f = false;
-        for(int i = 0; i < vm->taskCount;i++){
-            if(!f){
-                if(vm->tasks[i] == ctx) {
+        for (int i = 0; i < vm->taskCount; i++) {
+            if (!f) {
+                if (vm->tasks[i] == ctx) {
                     f = true;
                 }
             } else {
                 // shift all later one spot up
-                vm->tasks[i-1] = vm->tasks[i];
+                vm->tasks[i - 1] = vm->tasks[i];
             }
         }
-
     }
     vm->taskCount--;
-    vm->tasks = SHRINK_ARRAY(vm, vm->tasks, Task*, vm->taskCount+1, vm->taskCount);
+    vm->tasks =
+        SHRINK_ARRAY(vm, vm->tasks, Task *, vm->taskCount + 1, vm->taskCount);
 }
-Task* popTask(DictuVM* vm, bool back){
+Task *popTask(DictuVM *vm, bool back) {
     if (vm->taskCount == 0)
         return NULL;
-    Task* t = back ? vm->tasks[vm->taskCount-1] : vm->tasks[0];
+    Task *t = back ? vm->tasks[vm->taskCount - 1] : vm->tasks[0];
     releaseTask(vm, t);
     return t;
 }
@@ -310,9 +322,7 @@ Value pop(DictuVM *vm) {
     return *vm->stackTop;
 }
 
-Value peek(DictuVM *vm, int distance) {
-    return vm->stackTop[-1 - distance];
-}
+Value peek(DictuVM *vm, int distance) { return vm->stackTop[-1 - distance]; }
 
 ObjClosure *compileModuleToClosure(DictuVM *vm, char *name, char *source) {
     ObjString *pathObj = copyString(vm, name, strlen(name));
@@ -323,7 +333,8 @@ ObjClosure *compileModuleToClosure(DictuVM *vm, char *name, char *source) {
     ObjFunction *function = compile(vm, module, source);
     pop(vm);
 
-    if (function == NULL) return NULL;
+    if (function == NULL)
+        return NULL;
     push(vm, OBJ_VAL(function));
     ObjClosure *closure = newClosure(vm, function);
     pop(vm);
@@ -331,58 +342,63 @@ ObjClosure *compileModuleToClosure(DictuVM *vm, char *name, char *source) {
     return closure;
 }
 
-AsyncContext* copyVmState(DictuVM* vm){
-    AsyncContext* context = createAsyncContext(vm);
+AsyncContext *copyVmState(DictuVM *vm) {
+    AsyncContext *context = createAsyncContext(vm);
     context->breakFrame = -1;
     context->refs = 1;
     context->frameCount = vm->frameCount;
-    context->frameCapacity = vm->frameCapacity+1;
-    context->frames = ALLOCATE(vm, CallFrame, vm->frameCapacity+1);
+    context->frameCapacity = vm->frameCapacity + 1;
+    context->frames = ALLOCATE(vm, CallFrame, vm->frameCapacity + 1);
     memcpy(context->frames, vm->frames, sizeof(CallFrame) * vm->frameCount);
-    printf("stack size %ld\n", vm->stackTop-(&vm->stack[0]));
-    memcpy(context->stack, vm->stack, sizeof(Value) * (vm->stackTop-&vm->stack[0]));
-    for(int i = 0; i < context->frameCount; i++){
+    printf("stack size %ld\n", vm->stackTop - (&vm->stack[0]));
+    memcpy(context->stack, vm->stack,
+           sizeof(Value) * (vm->stackTop - &vm->stack[0]));
+    for (int i = 0; i < context->frameCount; i++) {
         int currentOffset = vm->stackTop - &(vm->frames[i].slots[0]);
-        printf("current offset: %d %p %p\n", currentOffset, vm->frames[i].slots, vm->stack);
-        Value* ptr = context->stack;
-        context->frames[i].slots = &ptr[currentOffset-1];
+        printf("current offset: %d %p %p\n", currentOffset, vm->frames[i].slots,
+               vm->stack);
+        Value *ptr = context->stack;
+        context->frames[i].slots = &ptr[currentOffset - 1];
     }
-    context->stackSize = vm->stackTop-vm->stack;
-    ObjUpvalue* upvalue = vm->openUpvalues;
-    ObjUpvalue* current;
-    while(upvalue != NULL){
-       if (context->openUpvalues == NULL) {
-        context->openUpvalues = ALLOCATE(vm, ObjUpvalue, 1);
-        current = context->openUpvalues;
-       } else {
-        current->next = ALLOCATE(vm, ObjUpvalue, 1);;
-        current = current->next;
-       }
-       memcpy(current, upvalue, sizeof(ObjUpvalue));
-       current->next = NULL;
-       upvalue = upvalue->next;
-    } 
+    context->stackSize = vm->stackTop - vm->stack;
+    ObjUpvalue *upvalue = vm->openUpvalues;
+    ObjUpvalue *current;
+    while (upvalue != NULL) {
+        if (context->openUpvalues == NULL) {
+            context->openUpvalues = ALLOCATE(vm, ObjUpvalue, 1);
+            current = context->openUpvalues;
+        } else {
+            current->next = ALLOCATE(vm, ObjUpvalue, 1);
+            ;
+            current = current->next;
+        }
+        memcpy(current, upvalue, sizeof(ObjUpvalue));
+        current->next = NULL;
+        upvalue = upvalue->next;
+    }
     return context;
 }
 
 static bool call(DictuVM *vm, ObjClosure *closure, int argCount, bool await) {
     if (argCount < closure->function->arity) {
-        if ((argCount + closure->function->isVariadic) == closure->function->arity) {
+        if ((argCount + closure->function->isVariadic) ==
+            closure->function->arity) {
             // add missing variadic param ([])
             ObjList *list = newList(vm);
             push(vm, OBJ_VAL(list));
             argCount++;
         } else {
-            runtimeError(vm, "Function '%s' expected %d argument(s) but got %d.",
+            runtimeError(vm,
+                         "Function '%s' expected %d argument(s) but got %d.",
                          closure->function->name->chars,
-                         closure->function->arity,
-                         argCount
-            );
+                         closure->function->arity, argCount);
             return false;
         }
-    } else if (argCount > closure->function->arity + closure->function->arityOptional) {
+    } else if (argCount >
+               closure->function->arity + closure->function->arityOptional) {
         if (closure->function->isVariadic) {
-            int arity = closure->function->arity + closure->function->arityOptional;
+            int arity =
+                closure->function->arity + closure->function->arityOptional;
             // +1 for the variadic param itself
             int varargs = argCount - arity + 1;
             ObjList *list = newList(vm);
@@ -395,11 +411,11 @@ static bool call(DictuVM *vm, ObjClosure *closure, int argCount, bool await) {
             push(vm, OBJ_VAL(list));
             argCount = arity;
         } else {
-            runtimeError(vm, "Function '%s' expected %d argument(s) but got %d.",
-                         closure->function->name->chars,
-                         closure->function->arity + closure->function->arityOptional,
-                         argCount
-            );
+            runtimeError(
+                vm, "Function '%s' expected %d argument(s) but got %d.",
+                closure->function->name->chars,
+                closure->function->arity + closure->function->arityOptional,
+                argCount);
             return false;
         }
     } else if (closure->function->isVariadic) {
@@ -413,101 +429,99 @@ static bool call(DictuVM *vm, ObjClosure *closure, int argCount, bool await) {
     if (vm->frameCount == vm->frameCapacity) {
         int oldCapacity = vm->frameCapacity;
         vm->frameCapacity = GROW_CAPACITY(vm->frameCapacity);
-        vm->frames = GROW_ARRAY(vm, vm->frames, CallFrame,
-                                   oldCapacity, vm->frameCapacity);
+        vm->frames = GROW_ARRAY(vm, vm->frames, CallFrame, oldCapacity,
+                                vm->frameCapacity);
     }
 
-    if(await && !vm->frames[vm->frameCount-1].closure->function->async) {
+    if (await && !vm->frames[vm->frameCount - 1].closure->function->async) {
         runtimeError(vm, "await call outside of async block!");
         return false;
     }
 
-    if(closure->function->async){
-        AsyncContext* context = copyVmState(vm);
+    if (closure->function->async) {
+        AsyncContext *context = copyVmState(vm);
         context->result = newFuture(vm);
         context->result->isAwait = await;
         context->breakFrame = vm->frameCount;
         CallFrame *frame = &context->frames[context->frameCount++];
         frame->closure = closure;
         frame->ip = closure->function->chunk.code;
-        frame->slots = (context->stack + (context->stackSize  - argCount - 1));
+        frame->slots = (context->stack + (context->stackSize - argCount - 1));
         frame->asynContextCreated = 0;
         push(vm, OBJ_VAL(context->result));
-        Task* task = createTask(vm, false);
+        Task *task = createTask(vm, false);
         task->asyncContext = context;
         return true;
     }
 
     CallFrame *frame = &vm->frames[vm->frameCount++];
-            frame->asynContextCreated = 0;
+    frame->asynContextCreated = 0;
     frame->closure = closure;
     frame->ip = closure->function->chunk.code;
     frame->slots = vm->stackTop - argCount - 1;
 
-
     return true;
 }
 
-static bool callValue(DictuVM *vm, Value callee, int argCount, bool unpack, bool await) {
+static bool callValue(DictuVM *vm, Value callee, int argCount, bool unpack,
+                      bool await) {
     if (IS_OBJ(callee)) {
         HANDLE_UNPACK
 
         switch (OBJ_TYPE(callee)) {
-            case OBJ_BOUND_METHOD: {
-                ObjBoundMethod *bound = AS_BOUND_METHOD(callee);
+        case OBJ_BOUND_METHOD: {
+            ObjBoundMethod *bound = AS_BOUND_METHOD(callee);
 
-                // Replace the bound method with the receiver so it's in the
-                // right slot when the method is called.
-                vm->stackTop[-argCount - 1] = bound->receiver;
-                return call(vm, bound->method, argCount, await);
-            }
+            // Replace the bound method with the receiver so it's in the
+            // right slot when the method is called.
+            vm->stackTop[-argCount - 1] = bound->receiver;
+            return call(vm, bound->method, argCount, await);
+        }
 
-            case OBJ_CLASS: {
-                // If it's not a default class, e.g a trait, it is not callable
-                if (!(IS_DEFAULT_CLASS(callee))) {
-                    break;
-                }
-
-                ObjClass *klass = AS_CLASS(callee);
-
-                // Create the instance.
-                vm->stackTop[-argCount - 1] = OBJ_VAL(newInstance(vm, klass));
-
-                // Call the initializer, if there is one.
-                Value initializer;
-                if (tableGet(&klass->publicMethods, vm->initString, &initializer)) {
-                    return call(vm, AS_CLOSURE(initializer), argCount, await);
-                } else if (argCount != 0) {
-                    runtimeError(vm, "Expected 0 arguments but got %d.", argCount);
-                    return false;
-                }
-
-                return true;
-            }
-
-            case OBJ_CLOSURE: {
-                vm->stackTop[-argCount - 1] = callee;
-
-
-
-                return call(vm, AS_CLOSURE(callee), argCount, await);
-            }
-
-            case OBJ_NATIVE: {
-                NativeFn native = AS_NATIVE(callee);
-                Value result = native(vm, argCount, vm->stackTop - argCount);
-
-                if (IS_EMPTY(result))
-                    return false;
-
-                vm->stackTop -= argCount + 1;
-                push(vm, result);
-                return true;
-            }
-
-            default:
-                // Do nothing.
+        case OBJ_CLASS: {
+            // If it's not a default class, e.g a trait, it is not callable
+            if (!(IS_DEFAULT_CLASS(callee))) {
                 break;
+            }
+
+            ObjClass *klass = AS_CLASS(callee);
+
+            // Create the instance.
+            vm->stackTop[-argCount - 1] = OBJ_VAL(newInstance(vm, klass));
+
+            // Call the initializer, if there is one.
+            Value initializer;
+            if (tableGet(&klass->publicMethods, vm->initString, &initializer)) {
+                return call(vm, AS_CLOSURE(initializer), argCount, await);
+            } else if (argCount != 0) {
+                runtimeError(vm, "Expected 0 arguments but got %d.", argCount);
+                return false;
+            }
+
+            return true;
+        }
+
+        case OBJ_CLOSURE: {
+            vm->stackTop[-argCount - 1] = callee;
+
+            return call(vm, AS_CLOSURE(callee), argCount, await);
+        }
+
+        case OBJ_NATIVE: {
+            NativeFn native = AS_NATIVE(callee);
+            Value result = native(vm, argCount, vm->stackTop - argCount);
+
+            if (IS_EMPTY(result))
+                return false;
+
+            vm->stackTop -= argCount + 1;
+            push(vm, result);
+            return true;
+        }
+
+        default:
+            // Do nothing.
+            break;
         }
     }
 
@@ -531,10 +545,11 @@ static bool callNativeMethod(DictuVM *vm, Value method, int argCount) {
     return true;
 }
 
-static bool callNativeMethodExcludeSelf(DictuVM *vm, Value method, int argCount) {
+static bool callNativeMethodExcludeSelf(DictuVM *vm, Value method,
+                                        int argCount) {
     NativeFn native = AS_NATIVE(method);
 
-    Value result = native(vm, argCount, vm->stackTop - (argCount-1) - 1);
+    Value result = native(vm, argCount, vm->stackTop - (argCount - 1) - 1);
 
     if (IS_EMPTY(result))
         return false;
@@ -552,7 +567,10 @@ static bool invokeFromClass(DictuVM *vm, ObjClass *klass, ObjString *name,
     Value method;
     if (!tableGet(&klass->publicMethods, name, &method)) {
         if (tableGet(&klass->privateMethods, name, &method)) {
-            runtimeError(vm, "Cannot access private attribute '%s' from superclass '%s'.", name->chars, klass->name->chars);
+            runtimeError(
+                vm,
+                "Cannot access private attribute '%s' from superclass '%s'.",
+                name->chars, klass->name->chars);
             return false;
         }
 
@@ -563,7 +581,8 @@ static bool invokeFromClass(DictuVM *vm, ObjClass *klass, ObjString *name,
     return call(vm, AS_CLOSURE(method), argCount, await);
 }
 
-static bool invokeInternal(DictuVM *vm, ObjString *name, int argCount, bool unpack, bool await) {
+static bool invokeInternal(DictuVM *vm, ObjString *name, int argCount,
+                           bool unpack, bool await) {
     Value receiver = peek(vm, argCount);
 
     HANDLE_UNPACK
@@ -600,7 +619,9 @@ static bool invokeInternal(DictuVM *vm, ObjString *name, int argCount, bool unpa
                     return callNativeMethod(vm, method, argCount);
                 }
 
-                runtimeError(vm, "'%s' is not static. Only static methods can be invoked directly from a class.",
+                runtimeError(vm,
+                             "'%s' is not static. Only static methods can be "
+                             "invoked directly from a class.",
                              name->chars);
                 return false;
             }
@@ -614,7 +635,9 @@ static bool invokeInternal(DictuVM *vm, ObjString *name, int argCount, bool unpa
                     return callNativeMethod(vm, method, argCount);
                 }
 
-                runtimeError(vm, "'%s' is not static. Only static methods can be invoked directly from a class.",
+                runtimeError(vm,
+                             "'%s' is not static. Only static methods can be "
+                             "invoked directly from a class.",
                              name->chars);
                 return false;
             }
@@ -631,7 +654,8 @@ static bool invokeInternal(DictuVM *vm, ObjString *name, int argCount, bool unpa
     return false;
 }
 
-static bool invoke(DictuVM *vm, ObjString *name, int argCount, bool unpack, bool await) {
+static bool invoke(DictuVM *vm, ObjString *name, int argCount, bool unpack,
+                   bool await) {
     Value receiver = peek(vm, argCount);
 
     HANDLE_UNPACK
@@ -664,211 +688,216 @@ static bool invoke(DictuVM *vm, ObjString *name, int argCount, bool unpack, bool
         }
     } else {
         switch (getObjType(receiver)) {
-            case OBJ_MODULE: {
-                ObjModule *module = AS_MODULE(receiver);
+        case OBJ_MODULE: {
+            ObjModule *module = AS_MODULE(receiver);
 
-                Value value;
-                if (!tableGet(&module->values, name, &value)) {
-                    runtimeError(vm, "Undefined attribute '%s'.", name->chars);
+            Value value;
+            if (!tableGet(&module->values, name, &value)) {
+                runtimeError(vm, "Undefined attribute '%s'.", name->chars);
+                return false;
+            }
+            return callValue(vm, value, argCount, unpack, await);
+        }
+
+        case OBJ_CLASS: {
+            ObjClass *instance = AS_CLASS(receiver);
+            Value method;
+            if (tableGet(&instance->publicMethods, name, &method)) {
+                if (AS_CLOSURE(method)->function->type != TYPE_STATIC) {
+                    if (tableGet(&vm->classMethods, name, &method)) {
+                        return callNativeMethod(vm, method, argCount);
+                    }
+
+                    runtimeError(vm,
+                                 "'%s' is not static. Only static methods can "
+                                 "be invoked directly from a class.",
+                                 name->chars);
                     return false;
                 }
+
+                return callValue(vm, method, argCount, unpack, await);
+            }
+
+            if (tableGet(&vm->classMethods, name, &method)) {
+                return callNativeMethod(vm, method, argCount);
+            }
+
+            runtimeError(vm, "Undefined attribute '%s'.", name->chars);
+            return false;
+        }
+
+        case OBJ_INSTANCE: {
+            ObjInstance *instance = AS_INSTANCE(receiver);
+
+            Value value;
+            // Look for the method.
+            if (tableGet(&instance->klass->publicMethods, name, &value)) {
+                return call(vm, AS_CLOSURE(value), argCount, await);
+            }
+
+            // Check for instance methods.
+            if (tableGet(&vm->instanceMethods, name, &value)) {
+                return callNativeMethod(vm, value, argCount);
+            }
+
+            // Look for a field which may shadow a method.
+            if (tableGet(&instance->publicAttributes, name, &value)) {
+                vm->stackTop[-argCount - 1] = value;
                 return callValue(vm, value, argCount, unpack, await);
             }
 
-            case OBJ_CLASS: {
-                ObjClass *instance = AS_CLASS(receiver);
-                Value method;
-                if (tableGet(&instance->publicMethods, name, &method)) {
-                    if (AS_CLOSURE(method)->function->type != TYPE_STATIC) {
-                        if (tableGet(&vm->classMethods, name, &method)) {
-                            return callNativeMethod(vm, method, argCount);
-                        }
-
-                        runtimeError(vm, "'%s' is not static. Only static methods can be invoked directly from a class.",
-                                     name->chars);
-                        return false;
-                    }
-
-                    return callValue(vm, method, argCount, unpack, await);
-                }
-
-                if (tableGet(&vm->classMethods, name, &method)) {
-                    return callNativeMethod(vm, method, argCount);
-                }
-
-                runtimeError(vm, "Undefined attribute '%s'.", name->chars);
+            if (tableGet(&instance->klass->privateMethods, name, &value)) {
+                runtimeError(
+                    vm,
+                    "Cannot access private attribute '%s' on '%s' instance.",
+                    name->chars, instance->klass->name->chars);
                 return false;
             }
 
-            case OBJ_INSTANCE: {
-                ObjInstance *instance = AS_INSTANCE(receiver);
+            runtimeError(vm, "Undefined attribute '%s'.", name->chars);
+            return false;
+        }
 
-                Value value;
-                // Look for the method.
-                if (tableGet(&instance->klass->publicMethods, name, &value)) {
-                    return call(vm, AS_CLOSURE(value), argCount, await);
-                }
+        case OBJ_STRING: {
+            Value value;
+            if (tableGet(&vm->stringMethods, name, &value)) {
+                return callNativeMethod(vm, value, argCount);
+            }
 
-                // Check for instance methods.
-                if (tableGet(&vm->instanceMethods, name, &value)) {
+            runtimeError(vm, "String has no method %s().", name->chars);
+            return false;
+        }
+        case OBJ_FUTURE: {
+            Value value;
+            if (tableGet(&vm->futureMethods, name, &value)) {
+                return callNativeMethod(vm, value, argCount);
+            }
+
+            runtimeError(vm, "Future has no method %s().", name->chars);
+            return false;
+        }
+        case OBJ_LIST: {
+            Value value;
+            if (tableGet(&vm->listMethods, name, &value)) {
+                if (IS_NATIVE(value)) {
                     return callNativeMethod(vm, value, argCount);
                 }
 
-                // Look for a field which may shadow a method.
-                if (tableGet(&instance->publicAttributes, name, &value)) {
-                    vm->stackTop[-argCount - 1] = value;
-                    return callValue(vm, value, argCount, unpack, await);
+                push(vm, peek(vm, 0));
+
+                for (int i = 2; i <= argCount + 1; i++) {
+                    vm->stackTop[-i] = peek(vm, i);
                 }
 
-                if (tableGet(&instance->klass->privateMethods, name, &value)) {
-                    runtimeError(vm, "Cannot access private attribute '%s' on '%s' instance.", name->chars, instance->klass->name->chars);
-                    return false;
-                }
-
-                runtimeError(vm, "Undefined attribute '%s'.", name->chars);
-                return false;
+                return call(vm, AS_CLOSURE(value), argCount + 1, await);
             }
 
-            case OBJ_STRING: {
-                Value value;
-                if (tableGet(&vm->stringMethods, name, &value)) {
+            runtimeError(vm, "List has no method %s().", name->chars);
+            return false;
+        }
+
+        case OBJ_DICT: {
+            Value value;
+            if (tableGet(&vm->dictMethods, name, &value)) {
+                if (IS_NATIVE(value)) {
                     return callNativeMethod(vm, value, argCount);
                 }
 
-                runtimeError(vm, "String has no method %s().", name->chars);
-                return false;
+                push(vm, peek(vm, 0));
+
+                for (int i = 2; i <= argCount + 1; i++) {
+                    vm->stackTop[-i] = peek(vm, i);
+                }
+
+                return call(vm, AS_CLOSURE(value), argCount + 1, await);
             }
-            case OBJ_FUTURE: {
-                Value value;
-                if (tableGet(&vm->futureMethods, name, &value)) {
+
+            runtimeError(vm, "Dict has no method %s().", name->chars);
+            return false;
+        }
+
+        case OBJ_SET: {
+            Value value;
+            if (tableGet(&vm->setMethods, name, &value)) {
+                return callNativeMethod(vm, value, argCount);
+            }
+
+            runtimeError(vm, "Set has no method %s().", name->chars);
+            return false;
+        }
+
+        case OBJ_FILE: {
+            Value value;
+            if (tableGet(&vm->fileMethods, name, &value)) {
+                return callNativeMethod(vm, value, argCount);
+            }
+
+            runtimeError(vm, "File has no method %s().", name->chars);
+            return false;
+        }
+
+        case OBJ_RESULT: {
+            Value value;
+            if (tableGet(&vm->resultMethods, name, &value)) {
+                if (IS_NATIVE(value)) {
                     return callNativeMethod(vm, value, argCount);
                 }
 
-                runtimeError(vm, "Future has no method %s().", name->chars);
-                return false;
-            }
-            case OBJ_LIST: {
-                Value value;
-                if (tableGet(&vm->listMethods, name, &value)) {
-                    if (IS_NATIVE(value)) {
-                        return callNativeMethod(vm, value, argCount);
-                    }
+                push(vm, peek(vm, 0));
 
-                    push(vm, peek(vm, 0));
-
-                    for (int i = 2; i <= argCount + 1; i++) {
-                        vm->stackTop[-i] = peek(vm, i);
-                    }
-
-                    return call(vm, AS_CLOSURE(value), argCount + 1, await);
+                for (int i = 2; i <= argCount + 1; i++) {
+                    vm->stackTop[-i] = peek(vm, i);
                 }
 
-                runtimeError(vm, "List has no method %s().", name->chars);
-                return false;
+                return call(vm, AS_CLOSURE(value), argCount + 1, await);
             }
 
-            case OBJ_DICT: {
-                Value value;
-                if (tableGet(&vm->dictMethods, name, &value)) {
-                    if (IS_NATIVE(value)) {
-                        return callNativeMethod(vm, value, argCount);
-                    }
+            runtimeError(vm, "Result has no method %s().", name->chars);
+            return false;
+        }
 
-                    push(vm, peek(vm, 0));
+        case OBJ_ABSTRACT: {
+            ObjAbstract *abstract = AS_ABSTRACT(receiver);
 
-                    for (int i = 2; i <= argCount + 1; i++) {
-                        vm->stackTop[-i] = peek(vm, i);
-                    }
-
-                    return call(vm, AS_CLOSURE(value), argCount + 1, await);
-                }
-
-                runtimeError(vm, "Dict has no method %s().", name->chars);
-                return false;
+            Value value;
+            if (tableGet(&abstract->values, name, &value)) {
+                if (abstract->excludeSelf)
+                    return callNativeMethodExcludeSelf(vm, value, argCount);
+                return callNativeMethod(vm, value, argCount);
             }
 
-            case OBJ_SET: {
-                Value value;
-                if (tableGet(&vm->setMethods, name, &value)) {
+            runtimeError(vm, "Object has no method %s().", name->chars);
+            return false;
+        }
+
+        case OBJ_ENUM: {
+            Value value;
+            if (tableGet(&vm->enumMethods, name, &value)) {
+                if (IS_NATIVE(value)) {
                     return callNativeMethod(vm, value, argCount);
                 }
 
-                runtimeError(vm, "Set has no method %s().", name->chars);
-                return false;
-            }
+                push(vm, peek(vm, 0));
 
-            case OBJ_FILE: {
-                Value value;
-                if (tableGet(&vm->fileMethods, name, &value)) {
-                    return callNativeMethod(vm, value, argCount);
+                for (int i = 2; i <= argCount + 1; i++) {
+                    vm->stackTop[-i] = peek(vm, i);
                 }
 
-                runtimeError(vm, "File has no method %s().", name->chars);
-                return false;
+                return call(vm, AS_CLOSURE(value), argCount + 1, await);
             }
 
-            case OBJ_RESULT: {
-                Value value;
-                if (tableGet(&vm->resultMethods, name, &value)) {
-                    if (IS_NATIVE(value)) {
-                        return callNativeMethod(vm, value, argCount);
-                    }
+            ObjEnum *enumObj = AS_ENUM(receiver);
 
-                    push(vm, peek(vm, 0));
-
-                    for (int i = 2; i <= argCount + 1; i++) {
-                        vm->stackTop[-i] = peek(vm, i);
-                    }
-
-                    return call(vm, AS_CLOSURE(value), argCount + 1, await);
-                }
-
-                runtimeError(vm, "Result has no method %s().", name->chars);
-                return false;
+            if (tableGet(&enumObj->values, name, &value)) {
+                return callValue(vm, value, argCount, false, await);
             }
 
-            case OBJ_ABSTRACT: {
-                ObjAbstract *abstract = AS_ABSTRACT(receiver);
+            runtimeError(vm, "Enum has no method '%s'.", name->chars);
+            return false;
+        }
 
-                Value value;
-                if (tableGet(&abstract->values, name, &value)) {
-                    if(abstract->excludeSelf)
-                         return callNativeMethodExcludeSelf(vm, value, argCount);
-                    return callNativeMethod(vm, value, argCount);
-                }
-
-                runtimeError(vm, "Object has no method %s().", name->chars);
-                return false;
-            }
-
-            case OBJ_ENUM: {
-                Value value;
-                if (tableGet(&vm->enumMethods, name, &value)) {
-                    if (IS_NATIVE(value)) {
-                        return callNativeMethod(vm, value, argCount);
-                    }
-
-                    push(vm, peek(vm, 0));
-
-                    for (int i = 2; i <= argCount + 1; i++) {
-                        vm->stackTop[-i] = peek(vm, i);
-                    }
-
-                    return call(vm, AS_CLOSURE(value), argCount + 1, await);
-                }
-
-                ObjEnum *enumObj = AS_ENUM(receiver);
-
-                if (tableGet(&enumObj->values, name, &value)) {
-                    return callValue(vm, value, argCount, false, await);
-                }
-
-                runtimeError(vm, "Enum has no method '%s'.", name->chars);
-                return false;
-            }
-
-            default:
-                break;
+        default:
+            break;
         }
     }
 
@@ -911,7 +940,8 @@ static ObjUpvalue *captureUpvalue(DictuVM *vm, Value *local) {
     }
 
     // If we found it, reuse it.
-    if (upvalue != NULL && upvalue->value == local) return upvalue;
+    if (upvalue != NULL && upvalue->value == local)
+        return upvalue;
 
     // We walked past the local on the stack, so there must not be an
     // upvalue for it already. Make a new one and link it in in the right
@@ -930,8 +960,7 @@ static ObjUpvalue *captureUpvalue(DictuVM *vm, Value *local) {
 }
 
 static void closeUpvalues(DictuVM *vm, Value *last) {
-    while (vm->openUpvalues != NULL &&
-           vm->openUpvalues->value >= last) {
+    while (vm->openUpvalues != NULL && vm->openUpvalues->value >= last) {
         ObjUpvalue *upvalue = vm->openUpvalues;
 
         // Move the value into the upvalue itself and point the upvalue to
@@ -962,7 +991,8 @@ static void defineMethod(DictuVM *vm, ObjString *name) {
     pop(vm);
 }
 
-static void createClass(DictuVM *vm, ObjString *name, ObjClass *superclass, ClassType type) {
+static void createClass(DictuVM *vm, ObjString *name, ObjClass *superclass,
+                        ClassType type) {
     ObjClass *klass = newClass(vm, name, superclass, type);
     push(vm, OBJ_VAL(klass));
 
@@ -989,8 +1019,7 @@ static void createClass(DictuVM *vm, ObjString *name, ObjClass *superclass, Clas
 }
 
 bool isFalsey(Value value) {
-    return IS_NIL(value) ||
-           (IS_BOOL(value) && !AS_BOOL(value)) ||
+    return IS_NIL(value) || (IS_BOOL(value) && !AS_BOOL(value)) ||
            (IS_NUMBER(value) && AS_NUMBER(value) == 0) ||
            (IS_STRING(value) && AS_CSTRING(value)[0] == '\0') ||
            (IS_LIST(value) && AS_LIST(value)->values.count == 0) ||
@@ -1021,7 +1050,8 @@ static void setReplVar(DictuVM *vm, Value value) {
     tableSet(vm, &vm->globals, vm->replVar, value);
 }
 
-static void copyAnnotations(DictuVM *vm, ObjDict *superAnnotations, ObjDict *klassAnnotations) {
+static void copyAnnotations(DictuVM *vm, ObjDict *superAnnotations,
+                            ObjDict *klassAnnotations) {
     for (int i = 0; i <= superAnnotations->capacityMask; ++i) {
         DictItem *item = &superAnnotations->entries[i];
 
@@ -1035,154 +1065,146 @@ static void copyAnnotations(DictuVM *vm, ObjDict *superAnnotations, ObjDict *kla
         }
 
         Value superVal = superAnnotations->entries[i].value;
-        dictSet(vm, klassAnnotations, superAnnotations->entries[i].key, superVal);
+        dictSet(vm, klassAnnotations, superAnnotations->entries[i].key,
+                superVal);
     }
 }
 
-
-
-static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame, AsyncContext* targetContext) {
+static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame,
+                                              AsyncContext *targetContext) {
     CallFrame *frame = &vm->frames[vm->frameCount - 1];
-    register uint8_t* ip = frame->ip;
+    register uint8_t *ip = frame->ip;
 
+#define READ_BYTE() (*ip++)
+#define READ_SHORT() (ip += 2, (uint16_t)((ip[-2] << 8) | ip[-1]))
 
-    #define READ_BYTE() (*ip++)
-    #define READ_SHORT() \
-        (ip += 2, (uint16_t)((ip[-2] << 8) | ip[-1]))
+#define READ_CONSTANT()                                                        \
+    (frame->closure->function->chunk.constants.values[READ_BYTE()])
 
-    #define READ_CONSTANT() \
-                (frame->closure->function->chunk.constants.values[READ_BYTE()])
+#define READ_STRING() AS_STRING(READ_CONSTANT())
 
-    #define READ_STRING() AS_STRING(READ_CONSTANT())
+#define UNSUPPORTED_OPERAND_TYPE_ERROR(op)                                     \
+    int firstValLength = 0;                                                    \
+    int secondValLength = 0;                                                   \
+    char *firstVal = valueTypeToString(vm, peek(vm, 1), &firstValLength);      \
+    char *secondVal = valueTypeToString(vm, peek(vm, 0), &secondValLength);    \
+                                                                               \
+    STORE_FRAME;                                                               \
+    runtimeError(vm, "Unsupported operand types for " #op ": '%s', '%s'",      \
+                 firstVal, secondVal);                                         \
+    FREE_ARRAY(vm, char, firstVal, firstValLength + 1);                        \
+    FREE_ARRAY(vm, char, secondVal, secondValLength + 1);                      \
+    return INTERPRET_RUNTIME_ERROR;
 
-    #define UNSUPPORTED_OPERAND_TYPE_ERROR(op)                                                      \
-        int firstValLength = 0;                                                                     \
-        int secondValLength = 0;                                                                    \
-        char *firstVal = valueTypeToString(vm, peek(vm, 1), &firstValLength);                       \
-        char *secondVal = valueTypeToString(vm, peek(vm, 0), &secondValLength);                     \
-                                                                                                    \
-        STORE_FRAME;                                                                                \
-        runtimeError(vm, "Unsupported operand types for "#op": '%s', '%s'", firstVal, secondVal);   \
-        FREE_ARRAY(vm, char, firstVal, firstValLength + 1);                                         \
-        FREE_ARRAY(vm, char, secondVal, secondValLength + 1);                                       \
-        return INTERPRET_RUNTIME_ERROR;                                                             \
+#define BINARY_OP(valueType, op, type)                                         \
+    do {                                                                       \
+        if (!IS_NUMBER(peek(vm, 0)) || !IS_NUMBER(peek(vm, 1))) {              \
+            UNSUPPORTED_OPERAND_TYPE_ERROR(op)                                 \
+        }                                                                      \
+                                                                               \
+        type b = AS_NUMBER(pop(vm));                                           \
+        type a = AS_NUMBER(peek(vm, 0));                                       \
+        vm->stackTop[-1] = valueType(a op b);                                  \
+    } while (false)
 
-    #define BINARY_OP(valueType, op, type)                                                                \
-        do {                                                                                              \
-          if (!IS_NUMBER(peek(vm, 0)) || !IS_NUMBER(peek(vm, 1))) {                                       \
-              UNSUPPORTED_OPERAND_TYPE_ERROR(op)                                                          \
-          }                                                                                               \
-                                                                                                          \
-          type b = AS_NUMBER(pop(vm));                                                                    \
-          type a = AS_NUMBER(peek(vm, 0));                                                                \
-          vm->stackTop[-1] = valueType(a op b);                                                           \
-        } while (false)
+#define BINARY_OP_FUNCTION(valueType, op, func, type)                          \
+    do {                                                                       \
+        if (!IS_NUMBER(peek(vm, 0)) || !IS_NUMBER(peek(vm, 1))) {              \
+            UNSUPPORTED_OPERAND_TYPE_ERROR(op)                                 \
+        }                                                                      \
+                                                                               \
+        type b = AS_NUMBER(pop(vm));                                           \
+        type a = AS_NUMBER(peek(vm, 0));                                       \
+        vm->stackTop[-1] = valueType(func(a, b));                              \
+    } while (false)
 
-    #define BINARY_OP_FUNCTION(valueType, op, func, type)                                                 \
-        do {                                                                                              \
-          if (!IS_NUMBER(peek(vm, 0)) || !IS_NUMBER(peek(vm, 1))) {                                       \
-              UNSUPPORTED_OPERAND_TYPE_ERROR(op)                                                          \
-          }                                                                                               \
-                                                                                                          \
-          type b = AS_NUMBER(pop(vm));                                                                    \
-          type a = AS_NUMBER(peek(vm, 0));                                                                \
-          vm->stackTop[-1] = valueType(func(a, b));                                                       \
-        } while (false)
+#define STORE_FRAME frame->ip = ip
 
-    #define STORE_FRAME frame->ip = ip
+#define RUNTIME_ERROR(...)                                                     \
+    do {                                                                       \
+        STORE_FRAME;                                                           \
+        runtimeError(vm, __VA_ARGS__);                                         \
+        return INTERPRET_RUNTIME_ERROR;                                        \
+    } while (0)
 
-    #define RUNTIME_ERROR(...)                                              \
-        do {                                                                \
-            STORE_FRAME;                                                    \
-            runtimeError(vm, __VA_ARGS__);                                  \
-            return INTERPRET_RUNTIME_ERROR;                                 \
-        } while (0)
+#define RUNTIME_ERROR_TYPE(error, distance)                                    \
+    do {                                                                       \
+        STORE_FRAME;                                                           \
+        int valLength = 0;                                                     \
+        char *val = valueTypeToString(vm, peek(vm, distance), &valLength);     \
+        runtimeError(vm, error, val);                                          \
+        FREE_ARRAY(vm, char, val, valLength + 1);                              \
+        return INTERPRET_RUNTIME_ERROR;                                        \
+    } while (0)
 
-    #define RUNTIME_ERROR_TYPE(error, distance)                                    \
-        do {                                                                       \
-            STORE_FRAME;                                                           \
-            int valLength = 0;                                                     \
-            char *val = valueTypeToString(vm, peek(vm, distance), &valLength);     \
-            runtimeError(vm, error, val);                                          \
-            FREE_ARRAY(vm, char, val, valLength + 1);                              \
-            return INTERPRET_RUNTIME_ERROR;                                        \
-        } while (0)
+#ifdef COMPUTED_GOTO
+    // #define DEBUG_TRACE_EXECUTION
 
-    #ifdef COMPUTED_GOTO
-        // #define DEBUG_TRACE_EXECUTION
-
-    static void* dispatchTable[] = {
-        #define OPCODE(name) &&op_##name,
-        #include "opcodes.h"
-        #undef OPCODE
+    static void *dispatchTable[] = {
+#define OPCODE(name) &&op_##name,
+#include "opcodes.h"
+#undef OPCODE
     };
 
-    #define INTERPRET_LOOP    DISPATCH();
-    #define CASE_CODE(name)   op_##name
+#define INTERPRET_LOOP DISPATCH();
+#define CASE_CODE(name) op_##name
 
-    #ifdef DEBUG_TRACE_EXECUTION
-        #define DISPATCH()                                                                        \
-            do                                                                                    \
-            {                                                                                     \
-                printf("          ");                                                             \
-                for (Value *stackValue = vm->stack; stackValue < vm->stackTop; stackValue++) {    \
-                    printf("[ ");                                                                 \
-                    printValue(*stackValue);                                                      \
-                    printf(" ]");                                                                 \
-                }                                                                                 \
-                printf("\n");                                                                     \
-                disassembleInstruction(&frame->closure->function->chunk,                          \
-                        (int) (ip - frame->closure->function->chunk.code));                \
-                goto *dispatchTable[instruction = READ_BYTE()];                                   \
-            }                                                                                     \
-            while (false)
-    #else
-        #define DISPATCH()                                            \
-            do                                                        \
-            {                                                         \
-                goto *dispatchTable[instruction = READ_BYTE()];       \
-            }                                                         \
-            while (false)
-    #endif
+#ifdef DEBUG_TRACE_EXECUTION
+#define DISPATCH()                                                             \
+    do {                                                                       \
+        printf("          ");                                                  \
+        for (Value *stackValue = vm->stack; stackValue < vm->stackTop;         \
+             stackValue++) {                                                   \
+            printf("[ ");                                                      \
+            printValue(*stackValue);                                           \
+            printf(" ]");                                                      \
+        }                                                                      \
+        printf("\n");                                                          \
+        disassembleInstruction(                                                \
+            &frame->closure->function->chunk,                                  \
+            (int)(ip - frame->closure->function->chunk.code));                 \
+        goto *dispatchTable[instruction = READ_BYTE()];                        \
+    } while (false)
+#else
+#define DISPATCH()                                                             \
+    do {                                                                       \
+        goto *dispatchTable[instruction = READ_BYTE()];                        \
+    } while (false)
+#endif
 
-    #else
+#else
 
-    #define INTERPRET_LOOP                                        \
-            loop:                                                 \
-                switch (instruction = READ_BYTE())
+#define INTERPRET_LOOP                                                         \
+    loop:                                                                      \
+    switch (instruction = READ_BYTE())
 
-    #define DISPATCH() goto loop
+#define DISPATCH() goto loop
 
-    #define CASE_CODE(name) case OP_##name
+#define CASE_CODE(name) case OP_##name
 
-    #endif
+#endif
 
     uint8_t instruction;
-    INTERPRET_LOOP
-    {
-        CASE_CODE(CONSTANT): {
+    INTERPRET_LOOP {
+        CASE_CODE(CONSTANT) : {
             Value constant = READ_CONSTANT();
             push(vm, constant);
             DISPATCH();
         }
 
-        CASE_CODE(NIL):
-            push(vm, NIL_VAL);
-            DISPATCH();
+        CASE_CODE(NIL) : push(vm, NIL_VAL);
+        DISPATCH();
 
-        CASE_CODE(EMPTY):
-            push(vm, EMPTY_VAL);
-            DISPATCH();
+        CASE_CODE(EMPTY) : push(vm, EMPTY_VAL);
+        DISPATCH();
 
-        CASE_CODE(TRUE):
-            push(vm, BOOL_VAL(true));
-            DISPATCH();
+        CASE_CODE(TRUE) : push(vm, BOOL_VAL(true));
+        DISPATCH();
 
-        CASE_CODE(FALSE):
-            push(vm, BOOL_VAL(false));
-            DISPATCH();
+        CASE_CODE(FALSE) : push(vm, BOOL_VAL(false));
+        DISPATCH();
 
-        CASE_CODE(POP_REPL): {
+        CASE_CODE(POP_REPL) : {
             Value v = peek(vm, 0);
             if (!IS_NIL(v)) {
                 setReplVar(vm, v);
@@ -1193,24 +1215,24 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame, Async
             DISPATCH();
         }
 
-        CASE_CODE(POP): {
+        CASE_CODE(POP) : {
             pop(vm);
             DISPATCH();
         }
 
-        CASE_CODE(GET_LOCAL): {
+        CASE_CODE(GET_LOCAL) : {
             uint8_t slot = READ_BYTE();
             push(vm, frame->slots[slot]);
             DISPATCH();
         }
 
-        CASE_CODE(SET_LOCAL): {
+        CASE_CODE(SET_LOCAL) : {
             uint8_t slot = READ_BYTE();
             frame->slots[slot] = peek(vm, 0);
             DISPATCH();
         }
 
-        CASE_CODE(GET_GLOBAL): {
+        CASE_CODE(GET_GLOBAL) : {
             ObjString *name = READ_STRING();
             Value value;
             if (!tableGet(&vm->globals, name, &value)) {
@@ -1220,33 +1242,37 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame, Async
             DISPATCH();
         }
 
-        CASE_CODE(GET_MODULE): {
+        CASE_CODE(GET_MODULE) : {
             ObjString *name = READ_STRING();
             Value value;
-            if (!tableGet(&frame->closure->function->module->values, name, &value)) {
+            if (!tableGet(&frame->closure->function->module->values, name,
+                          &value)) {
                 RUNTIME_ERROR("Undefined variable '%s'.", name->chars);
             }
             push(vm, value);
             DISPATCH();
         }
 
-        CASE_CODE(DEFINE_MODULE): {
+        CASE_CODE(DEFINE_MODULE) : {
             ObjString *name = READ_STRING();
-            tableSet(vm, &frame->closure->function->module->values, name, peek(vm, 0));
+            tableSet(vm, &frame->closure->function->module->values, name,
+                     peek(vm, 0));
             pop(vm);
             DISPATCH();
         }
 
-        CASE_CODE(SET_MODULE): {
+        CASE_CODE(SET_MODULE) : {
             ObjString *name = READ_STRING();
-            if (tableSet(vm, &frame->closure->function->module->values, name, peek(vm, 0))) {
-                tableDelete(vm, &frame->closure->function->module->values, name);
+            if (tableSet(vm, &frame->closure->function->module->values, name,
+                         peek(vm, 0))) {
+                tableDelete(vm, &frame->closure->function->module->values,
+                            name);
                 RUNTIME_ERROR("Undefined variable '%s'.", name->chars);
             }
             DISPATCH();
         }
 
-        CASE_CODE(DEFINE_OPTIONAL): {
+        CASE_CODE(DEFINE_OPTIONAL) : {
             int arity = READ_BYTE();
             int arityOptional = READ_BYTE();
             int argCount = vm->stackTop - frame->slots - arityOptional - 1;
@@ -1278,19 +1304,19 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame, Async
             DISPATCH();
         }
 
-        CASE_CODE(GET_UPVALUE): {
+        CASE_CODE(GET_UPVALUE) : {
             uint8_t slot = READ_BYTE();
             push(vm, *frame->closure->upvalues[slot]->value);
             DISPATCH();
         }
 
-        CASE_CODE(SET_UPVALUE): {
+        CASE_CODE(SET_UPVALUE) : {
             uint8_t slot = READ_BYTE();
             *frame->closure->upvalues[slot]->value = peek(vm, 0);
             DISPATCH();
         }
 
-        CASE_CODE(GET_ATTRIBUTE): {
+        CASE_CODE(GET_ATTRIBUTE) : {
             Value receiver = peek(vm, 0);
 
             if (!IS_OBJ(receiver)) {
@@ -1298,136 +1324,148 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame, Async
             }
 
             switch (getObjType(receiver)) {
-                case OBJ_INSTANCE: {
-                    ObjInstance *instance = AS_INSTANCE(receiver);
-                    ObjString *name = READ_STRING();
-                    Value value;
-                    if (tableGet(&instance->publicAttributes, name, &value)) {
+            case OBJ_INSTANCE: {
+                ObjInstance *instance = AS_INSTANCE(receiver);
+                ObjString *name = READ_STRING();
+                Value value;
+                if (tableGet(&instance->publicAttributes, name, &value)) {
+                    pop(vm); // Instance.
+                    push(vm, value);
+                    DISPATCH();
+                }
+
+                if (bindMethod(vm, instance->klass, name)) {
+                    DISPATCH();
+                }
+
+                // Check class for properties
+                ObjClass *klass = instance->klass;
+
+                while (klass != NULL) {
+                    if (tableGet(&klass->constants, name, &value)) {
                         pop(vm); // Instance.
                         push(vm, value);
                         DISPATCH();
                     }
 
-                    if (bindMethod(vm, instance->klass, name)) {
-                        DISPATCH();
-                    }
-
-                    // Check class for properties
-                    ObjClass *klass = instance->klass;
-
-                    while (klass != NULL) {
-                        if (tableGet(&klass->constants, name, &value)) {
-                            pop(vm); // Instance.
-                            push(vm, value);
-                            DISPATCH();
-                        }
-
-                        if (tableGet(&klass->variables, name, &value)) {
-                            pop(vm); // Instance.
-                            push(vm, value);
-                            DISPATCH();
-                        }
-
-                        klass = klass->superclass;
-                    }
-
-                    if (tableGet(&instance->privateAttributes, name, &value)) {
-                        RUNTIME_ERROR("Cannot access private attribute '%s' on '%s' instance.", name->chars, instance->klass->name->chars);
-                    }
-
-                    INSTANCE_HAS_NO_ATTR_ERR;
-                }
-
-                case OBJ_MODULE: {
-                    ObjModule *module = AS_MODULE(receiver);
-                    ObjString *name = READ_STRING();
-                    Value value;
-                    if (tableGet(&module->values, name, &value)) {
-                        pop(vm); // Module.
+                    if (tableGet(&klass->variables, name, &value)) {
+                        pop(vm); // Instance.
                         push(vm, value);
                         DISPATCH();
                     }
 
-                    RUNTIME_ERROR("'%s' module has no attribute: '%s'.", module->name->chars, name->chars);
+                    klass = klass->superclass;
                 }
 
-                case OBJ_ABSTRACT: {
-                    ObjAbstract *abstract = AS_ABSTRACT(receiver);
-                    ObjString *name = READ_STRING();
-                    Value value;
-                    if (tableGet(&abstract->values, name, &value)) {
-                        pop(vm); // Abstract.
-                        push(vm, value);
-                        DISPATCH();
-                    }
-                    RUNTIME_ERROR("'no attribute: '%s'.",name->chars);
+                if (tableGet(&instance->privateAttributes, name, &value)) {
+                    RUNTIME_ERROR("Cannot access private attribute '%s' on "
+                                  "'%s' instance.",
+                                  name->chars, instance->klass->name->chars);
                 }
 
-                case OBJ_CLASS: {
-                    ObjClass *klass = AS_CLASS(receiver);
-                    // Used to keep a reference to the class for the runtime error below
-                    ObjClass *klassStore = klass;
-                    ObjString *name = READ_STRING();
+                INSTANCE_HAS_NO_ATTR_ERR;
+            }
 
-                    Value value;
-                    while (klass != NULL) {
-                        if (tableGet(&klass->constants, name, &value)) {
-                            pop(vm); // Class.
-                            push(vm, value);
-                            DISPATCH();
-                        }
-
-                        if (tableGet(&klass->variables, name, &value)) {
-                            pop(vm); // Class.
-                            push(vm, value);
-                            DISPATCH();
-                        }
-
-                        klass = klass->superclass;
-                    }
-
-                    if (strcmp(name->chars, "classAnnotations") == 0) {
-                        pop(vm); // Klass
-                        push(vm, klassStore->classAnnotations == NULL ? NIL_VAL : OBJ_VAL(klassStore->classAnnotations));
-                        DISPATCH();
-                    }
-                    
-                    if (strcmp(name->chars, "methodAnnotations") == 0) {
-                        pop(vm); // Klass
-                        push(vm, klassStore->methodAnnotations == NULL ? NIL_VAL : OBJ_VAL(klassStore->methodAnnotations));
-                        DISPATCH();
-                    }
-
-                    if (strcmp(name->chars, "fieldAnnotations") == 0) {
-                        pop(vm); // Klass
-                        push(vm, klassStore->fieldAnnotations == NULL ? NIL_VAL : OBJ_VAL(klassStore->fieldAnnotations));
-                        DISPATCH();
-                    }
-
-                    RUNTIME_ERROR("'%s' class has no attribute: '%s'.", klassStore->name->chars, name->chars);
+            case OBJ_MODULE: {
+                ObjModule *module = AS_MODULE(receiver);
+                ObjString *name = READ_STRING();
+                Value value;
+                if (tableGet(&module->values, name, &value)) {
+                    pop(vm); // Module.
+                    push(vm, value);
+                    DISPATCH();
                 }
 
-                case OBJ_ENUM: {
-                    ObjEnum *enumObj = AS_ENUM(receiver);
-                    ObjString *name = READ_STRING();
-                    Value value;
+                RUNTIME_ERROR("'%s' module has no attribute: '%s'.",
+                              module->name->chars, name->chars);
+            }
 
-                    if (tableGet(&enumObj->values, name, &value)) {
-                        pop(vm); // Enum.
+            case OBJ_ABSTRACT: {
+                ObjAbstract *abstract = AS_ABSTRACT(receiver);
+                ObjString *name = READ_STRING();
+                Value value;
+                if (tableGet(&abstract->values, name, &value)) {
+                    pop(vm); // Abstract.
+                    push(vm, value);
+                    DISPATCH();
+                }
+                RUNTIME_ERROR("'no attribute: '%s'.", name->chars);
+            }
+
+            case OBJ_CLASS: {
+                ObjClass *klass = AS_CLASS(receiver);
+                // Used to keep a reference to the class for the runtime error
+                // below
+                ObjClass *klassStore = klass;
+                ObjString *name = READ_STRING();
+
+                Value value;
+                while (klass != NULL) {
+                    if (tableGet(&klass->constants, name, &value)) {
+                        pop(vm); // Class.
                         push(vm, value);
                         DISPATCH();
                     }
 
-                    RUNTIME_ERROR("'%s' enum has no attribute: '%s'.", enumObj->name->chars, name->chars);
+                    if (tableGet(&klass->variables, name, &value)) {
+                        pop(vm); // Class.
+                        push(vm, value);
+                        DISPATCH();
+                    }
+
+                    klass = klass->superclass;
                 }
 
-                default: {
-                    RUNTIME_ERROR_TYPE("'%s' type has no properties", 0);
+                if (strcmp(name->chars, "classAnnotations") == 0) {
+                    pop(vm); // Klass
+                    push(vm, klassStore->classAnnotations == NULL
+                                 ? NIL_VAL
+                                 : OBJ_VAL(klassStore->classAnnotations));
+                    DISPATCH();
                 }
+
+                if (strcmp(name->chars, "methodAnnotations") == 0) {
+                    pop(vm); // Klass
+                    push(vm, klassStore->methodAnnotations == NULL
+                                 ? NIL_VAL
+                                 : OBJ_VAL(klassStore->methodAnnotations));
+                    DISPATCH();
+                }
+
+                if (strcmp(name->chars, "fieldAnnotations") == 0) {
+                    pop(vm); // Klass
+                    push(vm, klassStore->fieldAnnotations == NULL
+                                 ? NIL_VAL
+                                 : OBJ_VAL(klassStore->fieldAnnotations));
+                    DISPATCH();
+                }
+
+                RUNTIME_ERROR("'%s' class has no attribute: '%s'.",
+                              klassStore->name->chars, name->chars);
+            }
+
+            case OBJ_ENUM: {
+                ObjEnum *enumObj = AS_ENUM(receiver);
+                ObjString *name = READ_STRING();
+                Value value;
+
+                if (tableGet(&enumObj->values, name, &value)) {
+                    pop(vm); // Enum.
+                    push(vm, value);
+                    DISPATCH();
+                }
+
+                RUNTIME_ERROR("'%s' enum has no attribute: '%s'.",
+                              enumObj->name->chars, name->chars);
+            }
+
+            default: {
+                RUNTIME_ERROR_TYPE("'%s' type has no properties", 0);
+            }
             }
         }
 
-        CASE_CODE(GET_PRIVATE_ATTRIBUTE): {
+        CASE_CODE(GET_PRIVATE_ATTRIBUTE) : {
             if (IS_INSTANCE(peek(vm, 0))) {
                 ObjInstance *instance = AS_INSTANCE(peek(vm, 0));
                 ObjString *name = READ_STRING();
@@ -1470,7 +1508,8 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame, Async
                 INSTANCE_HAS_NO_ATTR_ERR;
             } else if (IS_CLASS(peek(vm, 0))) {
                 ObjClass *klass = AS_CLASS(peek(vm, 0));
-                // Used to keep a reference to the class for the runtime error below
+                // Used to keep a reference to the class for the runtime error
+                // below
                 ObjClass *klassStore = klass;
                 ObjString *name = READ_STRING();
 
@@ -1491,13 +1530,14 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame, Async
                     klass = klass->superclass;
                 }
 
-                RUNTIME_ERROR("'%s' class has no attribute: '%s'.", klassStore->name->chars, name->chars);
+                RUNTIME_ERROR("'%s' class has no attribute: '%s'.",
+                              klassStore->name->chars, name->chars);
             }
 
             RUNTIME_ERROR_TYPE("'%s' type has no attributes", 0);
         }
 
-        CASE_CODE(GET_ATTRIBUTE_NO_POP): {
+        CASE_CODE(GET_ATTRIBUTE_NO_POP) : {
             if (!IS_INSTANCE(peek(vm, 0))) {
                 RUNTIME_ERROR("Only instances have attrributes.");
             }
@@ -1532,13 +1572,16 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame, Async
             }
 
             if (tableGet(&instance->privateAttributes, name, &value)) {
-                RUNTIME_ERROR("Cannot access private attribute '%s' on '%s' instance.", name->chars, instance->klass->name->chars);
+                RUNTIME_ERROR(
+                    "Cannot access private attribute '%s' on '%s' instance.",
+                    name->chars, instance->klass->name->chars);
             }
 
-            RUNTIME_ERROR("'%s' instance has no attribute2: '%s'.", instance->klass->name->chars, name->chars);
+            RUNTIME_ERROR("'%s' instance has no attribute2: '%s'.",
+                          instance->klass->name->chars, name->chars);
         }
 
-        CASE_CODE(GET_PRIVATE_ATTRIBUTE_NO_POP): {
+        CASE_CODE(GET_PRIVATE_ATTRIBUTE_NO_POP) : {
             if (!IS_INSTANCE(peek(vm, 0))) {
                 RUNTIME_ERROR("Only instances have attributes.");
             }
@@ -1580,10 +1623,11 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame, Async
             INSTANCE_HAS_NO_ATTR_ERR;
         }
 
-        CASE_CODE(SET_ATTRIBUTE): {
+        CASE_CODE(SET_ATTRIBUTE) : {
             if (IS_INSTANCE(peek(vm, 1))) {
                 ObjInstance *instance = AS_INSTANCE(peek(vm, 1));
-                tableSet(vm, &instance->publicAttributes, READ_STRING(), peek(vm, 0));
+                tableSet(vm, &instance->publicAttributes, READ_STRING(),
+                         peek(vm, 0));
                 pop(vm);
                 pop(vm);
                 push(vm, NIL_VAL);
@@ -1594,7 +1638,8 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame, Async
 
                 Value _;
                 if (tableGet(&klass->constants, key, &_)) {
-                    RUNTIME_ERROR("Cannot assign to class constant '%s.%s'.", klass->name->chars, key->chars);
+                    RUNTIME_ERROR("Cannot assign to class constant '%s.%s'.",
+                                  klass->name->chars, key->chars);
                 }
 
                 tableSet(vm, &klass->variables, key, peek(vm, 0));
@@ -1607,10 +1652,11 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame, Async
             RUNTIME_ERROR_TYPE("Can not set attribute on type '%s'", 1);
         }
 
-        CASE_CODE(SET_PRIVATE_ATTRIBUTE): {
+        CASE_CODE(SET_PRIVATE_ATTRIBUTE) : {
             if (IS_INSTANCE(peek(vm, 1))) {
                 ObjInstance *instance = AS_INSTANCE(peek(vm, 1));
-                tableSet(vm, &instance->privateAttributes, READ_STRING(), peek(vm, 0));
+                tableSet(vm, &instance->privateAttributes, READ_STRING(),
+                         peek(vm, 0));
                 pop(vm);
                 pop(vm);
                 push(vm, NIL_VAL);
@@ -1620,8 +1666,9 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame, Async
             DISPATCH();
         }
 
-        CASE_CODE(SET_CLASS_VAR): {
-            // No type check required as this opcode is only ever emitted when parsing a class
+        CASE_CODE(SET_CLASS_VAR) : {
+            // No type check required as this opcode is only ever emitted when
+            // parsing a class
             ObjClass *klass = AS_CLASS(peek(vm, 1));
             ObjString *key = READ_STRING();
             bool constant = READ_BYTE();
@@ -1635,33 +1682,42 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame, Async
             DISPATCH();
         }
 
-        CASE_CODE(SET_INIT_ATTRIBUTES): {
+        CASE_CODE(SET_INIT_ATTRIBUTES) : {
             ObjFunction *function = AS_FUNCTION(READ_CONSTANT());
             int argCount = function->arity + function->arityOptional;
-            ObjInstance *instance = AS_INSTANCE(peek(vm, function->arity + function->arityOptional));
+            ObjInstance *instance = AS_INSTANCE(
+                peek(vm, function->arity + function->arityOptional));
 
             for (int i = 0; i < function->propertyCount; ++i) {
-                ObjString *propertyName = AS_STRING(function->chunk.constants.values[function->propertyNames[i]]);
-                tableSet(vm, &instance->publicAttributes, propertyName, peek(vm, argCount - function->propertyIndexes[i] - 1));
+                ObjString *propertyName =
+                    AS_STRING(function->chunk.constants
+                                  .values[function->propertyNames[i]]);
+                tableSet(vm, &instance->publicAttributes, propertyName,
+                         peek(vm, argCount - function->propertyIndexes[i] - 1));
             }
 
             DISPATCH();
         }
 
-        CASE_CODE(SET_PRIVATE_INIT_ATTRIBUTES): {
+        CASE_CODE(SET_PRIVATE_INIT_ATTRIBUTES) : {
             ObjFunction *function = AS_FUNCTION(READ_CONSTANT());
             int argCount = function->arity + function->arityOptional;
-            ObjInstance *instance = AS_INSTANCE(peek(vm, function->arity + function->arityOptional));
+            ObjInstance *instance = AS_INSTANCE(
+                peek(vm, function->arity + function->arityOptional));
 
             for (int i = 0; i < function->privatePropertyCount; ++i) {
-                ObjString *propertyName = AS_STRING(function->chunk.constants.values[function->privatePropertyNames[i]]);
-                tableSet(vm, &instance->privateAttributes, propertyName, peek(vm, argCount - function->privatePropertyIndexes[i] - 1));
+                ObjString *propertyName =
+                    AS_STRING(function->chunk.constants
+                                  .values[function->privatePropertyNames[i]]);
+                tableSet(vm, &instance->privateAttributes, propertyName,
+                         peek(vm, argCount -
+                                      function->privatePropertyIndexes[i] - 1));
             }
 
             DISPATCH();
         }
 
-        CASE_CODE(GET_SUPER): {
+        CASE_CODE(GET_SUPER) : {
             ObjString *name = READ_STRING();
             ObjClass *superclass = AS_CLASS(pop(vm));
 
@@ -1671,16 +1727,17 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame, Async
             DISPATCH();
         }
 
-        CASE_CODE(EQUAL): {
+        CASE_CODE(EQUAL) : {
             Value b = pop(vm);
             Value a = pop(vm);
             push(vm, BOOL_VAL(valuesEqual(a, b)));
             DISPATCH();
         }
 
-        CASE_CODE(GREATER): {
+        CASE_CODE(GREATER) : {
             if (IS_STRING(peek(vm, 0)) && IS_STRING(peek(vm, 1))) {
-                // Use variables here as function argument evaluation order is unspecified
+                // Use variables here as function argument evaluation order is
+                // unspecified
                 Value first = pop(vm);
                 Value second = pop(vm);
 
@@ -1692,7 +1749,7 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame, Async
             DISPATCH();
         }
 
-        CASE_CODE(LESS): {
+        CASE_CODE(LESS) : {
             if (IS_STRING(peek(vm, 0)) && IS_STRING(peek(vm, 1))) {
                 Value first = pop(vm);
                 Value second = pop(vm);
@@ -1705,7 +1762,7 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame, Async
             DISPATCH();
         }
 
-        CASE_CODE(ADD): {
+        CASE_CODE(ADD) : {
             if (IS_STRING(peek(vm, 0)) && IS_STRING(peek(vm, 1))) {
                 concatenate(vm);
             } else if (IS_NUMBER(peek(vm, 0)) && IS_NUMBER(peek(vm, 1))) {
@@ -1720,11 +1777,13 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame, Async
                 push(vm, OBJ_VAL(finalList));
 
                 for (int i = 0; i < listOne->values.count; ++i) {
-                    writeValueArray(vm, &finalList->values, listOne->values.values[i]);
+                    writeValueArray(vm, &finalList->values,
+                                    listOne->values.values[i]);
                 }
 
                 for (int i = 0; i < listTwo->values.count; ++i) {
-                    writeValueArray(vm, &finalList->values, listTwo->values.values[i]);
+                    writeValueArray(vm, &finalList->values,
+                                    listTwo->values.values[i]);
                 }
 
                 pop(vm);
@@ -1739,82 +1798,75 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame, Async
             DISPATCH();
         }
 
-        CASE_CODE(SUBTRACT): {
+        CASE_CODE(SUBTRACT) : {
             BINARY_OP(NUMBER_VAL, -, double);
             DISPATCH();
         }
 
-        CASE_CODE(MULTIPLY):
-            BINARY_OP(NUMBER_VAL, *, double);
-            DISPATCH();
+        CASE_CODE(MULTIPLY) : BINARY_OP(NUMBER_VAL, *, double);
+        DISPATCH();
 
-        CASE_CODE(DIVIDE):
-            BINARY_OP(NUMBER_VAL, /, double);
-            DISPATCH();
+        CASE_CODE(DIVIDE) : BINARY_OP(NUMBER_VAL, /, double);
+        DISPATCH();
 
-        CASE_CODE(POW): {
+        CASE_CODE(POW) : {
             BINARY_OP_FUNCTION(NUMBER_VAL, **, powf, double);
             DISPATCH();
         }
 
-        CASE_CODE(MOD): {
+        CASE_CODE(MOD) : {
             BINARY_OP_FUNCTION(NUMBER_VAL, **, fmod, double);
             DISPATCH();
         }
 
-        CASE_CODE(BITWISE_AND):
-            BINARY_OP(NUMBER_VAL, &, int);
-            DISPATCH();
+        CASE_CODE(BITWISE_AND) : BINARY_OP(NUMBER_VAL, &, int);
+        DISPATCH();
 
-        CASE_CODE(BITWISE_XOR):
-            BINARY_OP(NUMBER_VAL, ^, int);
-            DISPATCH();
+        CASE_CODE(BITWISE_XOR) : BINARY_OP(NUMBER_VAL, ^, int);
+        DISPATCH();
 
-        CASE_CODE(BITWISE_OR):
-            BINARY_OP(NUMBER_VAL, |, int);
-            DISPATCH();
+        CASE_CODE(BITWISE_OR) : BINARY_OP(NUMBER_VAL, |, int);
+        DISPATCH();
 
-        CASE_CODE(NOT):
-            push(vm, BOOL_VAL(isFalsey(pop(vm))));
-            DISPATCH();
+        CASE_CODE(NOT) : push(vm, BOOL_VAL(isFalsey(pop(vm))));
+        DISPATCH();
 
-        CASE_CODE(NEGATE):
-            if (!IS_NUMBER(peek(vm, 0))) {
-                RUNTIME_ERROR_TYPE("Unsupported operand type for unary -: '%s'", 0);
-            }
+        CASE_CODE(NEGATE) : if (!IS_NUMBER(peek(vm, 0))) {
+            RUNTIME_ERROR_TYPE("Unsupported operand type for unary -: '%s'", 0);
+        }
 
-            push(vm, NUMBER_VAL(-AS_NUMBER(pop(vm))));
-            DISPATCH();
+        push(vm, NUMBER_VAL(-AS_NUMBER(pop(vm))));
+        DISPATCH();
 
-        CASE_CODE(JUMP): {
+        CASE_CODE(JUMP) : {
             uint16_t offset = READ_SHORT();
             ip += offset;
             DISPATCH();
         }
 
-        CASE_CODE(MULTI_CASE):{
+        CASE_CODE(MULTI_CASE) : {
             int count = READ_BYTE();
             Value switchValue = peek(vm, count + 1);
             Value caseValue = pop(vm);
             for (int i = 0; i < count; ++i) {
                 if (valuesEqual(switchValue, caseValue)) {
                     i++;
-                    while(i <= count) {
+                    while (i <= count) {
                         pop(vm);
-                        i++;   
+                        i++;
                     }
                     break;
                 }
                 caseValue = pop(vm);
             }
-            push(vm,caseValue);
+            push(vm, caseValue);
             DISPATCH();
         }
 
-        CASE_CODE(COMPARE_JUMP):{
+        CASE_CODE(COMPARE_JUMP) : {
             uint16_t offset = READ_SHORT();
             Value a = pop(vm);
-            if (!valuesEqual(peek(vm,0), a)) {
+            if (!valuesEqual(peek(vm, 0), a)) {
                 ip += offset;
             } else {
                 // switch expression.
@@ -1823,38 +1875,41 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame, Async
             DISPATCH();
         }
 
-        CASE_CODE(JUMP_IF_FALSE): {
+        CASE_CODE(JUMP_IF_FALSE) : {
             uint16_t offset = READ_SHORT();
-            if (isFalsey(peek(vm, 0))) ip += offset;
+            if (isFalsey(peek(vm, 0)))
+                ip += offset;
             DISPATCH();
         }
 
-        CASE_CODE(JUMP_IF_NIL): {
+        CASE_CODE(JUMP_IF_NIL) : {
             uint16_t offset = READ_SHORT();
-            if (IS_NIL(peek(vm, 0))) ip += offset;
+            if (IS_NIL(peek(vm, 0)))
+                ip += offset;
             DISPATCH();
         }
 
-        CASE_CODE(LOOP): {
+        CASE_CODE(LOOP) : {
             uint16_t offset = READ_SHORT();
             ip -= offset;
             DISPATCH();
         }
 
-        CASE_CODE(BREAK): {
-            DISPATCH();
-        }
+        CASE_CODE(BREAK) : { DISPATCH(); }
 
-        CASE_CODE(IMPORT): {
+        CASE_CODE(IMPORT) : {
             ObjString *fileName = READ_STRING();
             Value moduleVal;
 
             char path[PATH_MAX];
-            if (!resolvePath(frame->closure->function->module->path->chars, fileName->chars, path)) {
-                // if stdlib import is not found, try to load from the project's modules directory
+            if (!resolvePath(frame->closure->function->module->path->chars,
+                             fileName->chars, path)) {
+                // if stdlib import is not found, try to load from the project's
+                // modules directory
 
                 if (!resolvePath("dictu_modules", fileName->chars, path)) {
-                    RUNTIME_ERROR("Could not open file \"%s\".", fileName->chars);
+                    RUNTIME_ERROR("Could not open file \"%s\".",
+                                  fileName->chars);
                 }
             }
 
@@ -1885,7 +1940,8 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame, Async
 
             FREE_ARRAY(vm, char, source, strlen(source) + 1);
 
-            if (function == NULL) return INTERPRET_COMPILE_ERROR;
+            if (function == NULL)
+                return INTERPRET_COMPILE_ERROR;
             push(vm, OBJ_VAL(function));
             ObjClosure *closure = newClosure(vm, function);
             pop(vm);
@@ -1899,7 +1955,7 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame, Async
             DISPATCH();
         }
 
-        CASE_CODE(IMPORT_BUILTIN): {
+        CASE_CODE(IMPORT_BUILTIN) : {
             int index = READ_BYTE();
             ObjString *fileName = READ_STRING();
             Value moduleVal;
@@ -1932,7 +1988,7 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame, Async
             DISPATCH();
         }
 
-        CASE_CODE(IMPORT_BUILTIN_VARIABLE): {
+        CASE_CODE(IMPORT_BUILTIN_VARIABLE) : {
             ObjString *fileName = READ_STRING();
             int varCount = READ_BYTE();
 
@@ -1950,7 +2006,8 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame, Async
                 ObjString *variable = READ_STRING();
 
                 if (!tableGet(&module->values, variable, &moduleVariable)) {
-                    RUNTIME_ERROR("%s can't be found in module %s", variable->chars, module->name->chars);
+                    RUNTIME_ERROR("%s can't be found in module %s",
+                                  variable->chars, module->name->chars);
                 }
 
                 push(vm, moduleVariable);
@@ -1959,20 +2016,22 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame, Async
             DISPATCH();
         }
 
-        CASE_CODE(IMPORT_VARIABLE): {
+        CASE_CODE(IMPORT_VARIABLE) : {
             push(vm, OBJ_VAL(vm->lastModule));
             DISPATCH();
         }
 
-        CASE_CODE(IMPORT_FROM): {
+        CASE_CODE(IMPORT_FROM) : {
             int varCount = READ_BYTE();
 
             for (int i = 0; i < varCount; i++) {
                 Value moduleVariable;
                 ObjString *variable = READ_STRING();
 
-                if (!tableGet(&vm->lastModule->values, variable, &moduleVariable)) {
-                    RUNTIME_ERROR("%s can't be found in module %s", variable->chars, vm->lastModule->name->chars);
+                if (!tableGet(&vm->lastModule->values, variable,
+                              &moduleVariable)) {
+                    RUNTIME_ERROR("%s can't be found in module %s",
+                                  variable->chars, vm->lastModule->name->chars);
                 }
 
                 push(vm, moduleVariable);
@@ -1981,12 +2040,12 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame, Async
             DISPATCH();
         }
 
-        CASE_CODE(IMPORT_END): {
+        CASE_CODE(IMPORT_END) : {
             vm->lastModule = frame->closure->function->module;
             DISPATCH();
         }
 
-        CASE_CODE(NEW_LIST): {
+        CASE_CODE(NEW_LIST) : {
             int count = READ_BYTE();
             ObjList *list = newList(vm);
             push(vm, OBJ_VAL(list));
@@ -2000,11 +2059,12 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame, Async
             DISPATCH();
         }
 
-        CASE_CODE(UNPACK_LIST): {
+        CASE_CODE(UNPACK_LIST) : {
             int varCount = READ_BYTE();
 
             if (!IS_LIST(peek(vm, 0))) {
-                RUNTIME_ERROR("Attempting to unpack a value which is not a list.");
+                RUNTIME_ERROR(
+                    "Attempting to unpack a value which is not a list.");
             }
 
             ObjList *list = AS_LIST(pop(vm));
@@ -2024,7 +2084,7 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame, Async
             DISPATCH();
         }
 
-        CASE_CODE(NEW_DICT): {
+        CASE_CODE(NEW_DICT) : {
             int count = READ_BYTE();
             ObjDict *dict = newDict(vm);
             push(vm, OBJ_VAL(dict));
@@ -2043,7 +2103,7 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame, Async
             DISPATCH();
         }
 
-        CASE_CODE(SUBSCRIPT): {
+        CASE_CODE(SUBSCRIPT) : {
             Value indexValue = peek(vm, 0);
             Value subscriptValue = peek(vm, 1);
 
@@ -2052,83 +2112,86 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame, Async
             }
 
             switch (getObjType(subscriptValue)) {
-                case OBJ_LIST: {
-                    if (!IS_NUMBER(indexValue)) {
-                        RUNTIME_ERROR("List index must be a number.");
-                    }
-
-                    ObjList *list = AS_LIST(subscriptValue);
-                    int index = AS_NUMBER(indexValue);
-
-                    // Allow negative indexes
-                    if (index < 0)
-                        index = list->values.count + index;
-
-                    if (index >= 0 && index < list->values.count) {
-                        pop(vm);
-                        pop(vm);
-                        push(vm, list->values.values[index]);
-                        DISPATCH();
-                    }
-
-                    RUNTIME_ERROR("List index out of bounds.");
+            case OBJ_LIST: {
+                if (!IS_NUMBER(indexValue)) {
+                    RUNTIME_ERROR("List index must be a number.");
                 }
 
-                case OBJ_STRING: {
-                    ObjString *string = AS_STRING(subscriptValue);
-                    int len = string->character_len == -1 ? string->length : string->character_len;
-                    int index = AS_NUMBER(indexValue);
+                ObjList *list = AS_LIST(subscriptValue);
+                int index = AS_NUMBER(indexValue);
 
-                    // Allow negative indexes
-                    if (index < 0)
-                        index = len + index;
+                // Allow negative indexes
+                if (index < 0)
+                    index = list->values.count + index;
 
-                    if (index >= 0 && index < len) {
-                        ObjString* newString;
-                        if(string->character_len != -1 && string->character_len != string->length) {
-                            utf8_int32_t ch;
-                            char* ptr = string->chars;
-                            for(size_t i = 0; i <= (size_t)index; i++)
-                                ptr = utf8codepoint(ptr, &ch);
-                            size_t cpSize = utf8codepointsize(ch);
-                            newString = copyString(vm, ptr - cpSize, cpSize);
-
-                        } else {
-                            newString = copyString(vm, &string->chars[index], 1);
-                        }
-                        pop(vm);
-                        pop(vm);
-                        push(vm, OBJ_VAL(newString));
-                        DISPATCH();
-                    }
-
-                    RUNTIME_ERROR("String index out of bounds.");
-                }
-
-                case OBJ_DICT: {
-                    ObjDict *dict = AS_DICT(subscriptValue);
-                    if (!isValidKey(indexValue)) {
-                        RUNTIME_ERROR("Dictionary key must be an immutable type.");
-                    }
-
-                    Value v;
+                if (index >= 0 && index < list->values.count) {
                     pop(vm);
                     pop(vm);
-                    if (dictGet(dict, indexValue, &v)) {
-                        push(vm, v);
-                        DISPATCH();
+                    push(vm, list->values.values[index]);
+                    DISPATCH();
+                }
+
+                RUNTIME_ERROR("List index out of bounds.");
+            }
+
+            case OBJ_STRING: {
+                ObjString *string = AS_STRING(subscriptValue);
+                int len = string->character_len == -1 ? string->length
+                                                      : string->character_len;
+                int index = AS_NUMBER(indexValue);
+
+                // Allow negative indexes
+                if (index < 0)
+                    index = len + index;
+
+                if (index >= 0 && index < len) {
+                    ObjString *newString;
+                    if (string->character_len != -1 &&
+                        string->character_len != string->length) {
+                        utf8_int32_t ch;
+                        char *ptr = string->chars;
+                        for (size_t i = 0; i <= (size_t)index; i++)
+                            ptr = utf8codepoint(ptr, &ch);
+                        size_t cpSize = utf8codepointsize(ch);
+                        newString = copyString(vm, ptr - cpSize, cpSize);
+
+                    } else {
+                        newString = copyString(vm, &string->chars[index], 1);
                     }
-
-                    RUNTIME_ERROR("Key %s does not exist within dictionary.", valueToString(indexValue));
+                    pop(vm);
+                    pop(vm);
+                    push(vm, OBJ_VAL(newString));
+                    DISPATCH();
                 }
 
-                default: {
-                    RUNTIME_ERROR_TYPE("'%s' is not subscriptable", 1);
+                RUNTIME_ERROR("String index out of bounds.");
+            }
+
+            case OBJ_DICT: {
+                ObjDict *dict = AS_DICT(subscriptValue);
+                if (!isValidKey(indexValue)) {
+                    RUNTIME_ERROR("Dictionary key must be an immutable type.");
                 }
+
+                Value v;
+                pop(vm);
+                pop(vm);
+                if (dictGet(dict, indexValue, &v)) {
+                    push(vm, v);
+                    DISPATCH();
+                }
+
+                RUNTIME_ERROR("Key %s does not exist within dictionary.",
+                              valueToString(indexValue));
+            }
+
+            default: {
+                RUNTIME_ERROR_TYPE("'%s' is not subscriptable", 1);
+            }
             }
         }
 
-        CASE_CODE(SUBSCRIPT_ASSIGN): {
+        CASE_CODE(SUBSCRIPT_ASSIGN) : {
             Value assignValue = peek(vm, 0);
             Value indexValue = peek(vm, 1);
             Value subscriptValue = peek(vm, 2);
@@ -2138,36 +2201,19 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame, Async
             }
 
             switch (getObjType(subscriptValue)) {
-                case OBJ_LIST: {
-                    if (!IS_NUMBER(indexValue)) {
-                        RUNTIME_ERROR("List index must be a number.");
-                    }
-
-                    ObjList *list = AS_LIST(subscriptValue);
-                    int index = AS_NUMBER(indexValue);
-
-                    if (index < 0)
-                        index = list->values.count + index;
-
-                    if (index >= 0 && index < list->values.count) {
-                        list->values.values[index] = assignValue;
-                        pop(vm);
-                        pop(vm);
-                        pop(vm);
-                        push(vm, NIL_VAL);
-                        DISPATCH();
-                    }
-
-                    RUNTIME_ERROR("List index out of bounds.");
+            case OBJ_LIST: {
+                if (!IS_NUMBER(indexValue)) {
+                    RUNTIME_ERROR("List index must be a number.");
                 }
 
-                case OBJ_DICT: {
-                    ObjDict *dict = AS_DICT(subscriptValue);
-                    if (!isValidKey(indexValue)) {
-                        RUNTIME_ERROR("Dictionary key must be an immutable type.");
-                    }
+                ObjList *list = AS_LIST(subscriptValue);
+                int index = AS_NUMBER(indexValue);
 
-                    dictSet(vm, dict, indexValue, assignValue);
+                if (index < 0)
+                    index = list->values.count + index;
+
+                if (index >= 0 && index < list->values.count) {
+                    list->values.values[index] = assignValue;
                     pop(vm);
                     pop(vm);
                     pop(vm);
@@ -2175,13 +2221,30 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame, Async
                     DISPATCH();
                 }
 
-                default: {
-                    RUNTIME_ERROR_TYPE("'%s' does not support item assignment", 2);
+                RUNTIME_ERROR("List index out of bounds.");
+            }
+
+            case OBJ_DICT: {
+                ObjDict *dict = AS_DICT(subscriptValue);
+                if (!isValidKey(indexValue)) {
+                    RUNTIME_ERROR("Dictionary key must be an immutable type.");
                 }
+
+                dictSet(vm, dict, indexValue, assignValue);
+                pop(vm);
+                pop(vm);
+                pop(vm);
+                push(vm, NIL_VAL);
+                DISPATCH();
+            }
+
+            default: {
+                RUNTIME_ERROR_TYPE("'%s' does not support item assignment", 2);
+            }
             }
         }
 
-        CASE_CODE(SUBSCRIPT_PUSH): {
+        CASE_CODE(SUBSCRIPT_PUSH) : {
             Value value = peek(vm, 0);
             Value indexValue = peek(vm, 1);
             Value subscriptValue = peek(vm, 2);
@@ -2191,52 +2254,53 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame, Async
             }
 
             switch (getObjType(subscriptValue)) {
-                case OBJ_LIST: {
-                    if (!IS_NUMBER(indexValue)) {
-                        RUNTIME_ERROR("List index must be a number.");
-                    }
-
-                    ObjList *list = AS_LIST(subscriptValue);
-                    int index = AS_NUMBER(indexValue);
-
-                    // Allow negative indexes
-                    if (index < 0)
-                        index = list->values.count + index;
-
-                    if (index >= 0 && index < list->values.count) {
-                        vm->stackTop[-1] = list->values.values[index];
-                        push(vm, value);
-                        DISPATCH();
-                    }
-
-                    RUNTIME_ERROR("List index out of bounds.");
+            case OBJ_LIST: {
+                if (!IS_NUMBER(indexValue)) {
+                    RUNTIME_ERROR("List index must be a number.");
                 }
 
-                case OBJ_DICT: {
-                    ObjDict *dict = AS_DICT(subscriptValue);
-                    if (!isValidKey(indexValue)) {
-                        RUNTIME_ERROR("Dictionary key must be an immutable type.");
-                    }
+                ObjList *list = AS_LIST(subscriptValue);
+                int index = AS_NUMBER(indexValue);
 
-                    Value dictValue;
-                    if (!dictGet(dict, indexValue, &dictValue)) {
-                        RUNTIME_ERROR("Key %s does not exist within dictionary.", valueToString(indexValue));
-                    }
+                // Allow negative indexes
+                if (index < 0)
+                    index = list->values.count + index;
 
-                    vm->stackTop[-1] = dictValue;
+                if (index >= 0 && index < list->values.count) {
+                    vm->stackTop[-1] = list->values.values[index];
                     push(vm, value);
-
                     DISPATCH();
                 }
 
-                default: {
-                    RUNTIME_ERROR_TYPE("'%s' does not support item assignment", 2);
+                RUNTIME_ERROR("List index out of bounds.");
+            }
+
+            case OBJ_DICT: {
+                ObjDict *dict = AS_DICT(subscriptValue);
+                if (!isValidKey(indexValue)) {
+                    RUNTIME_ERROR("Dictionary key must be an immutable type.");
                 }
+
+                Value dictValue;
+                if (!dictGet(dict, indexValue, &dictValue)) {
+                    RUNTIME_ERROR("Key %s does not exist within dictionary.",
+                                  valueToString(indexValue));
+                }
+
+                vm->stackTop[-1] = dictValue;
+                push(vm, value);
+
+                DISPATCH();
+            }
+
+            default: {
+                RUNTIME_ERROR_TYPE("'%s' does not support item assignment", 2);
+            }
             }
             DISPATCH();
         }
 
-        CASE_CODE(SLICE): {
+        CASE_CODE(SLICE) : {
             Value sliceEndIndex = peek(vm, 0);
             Value sliceStartIndex = peek(vm, 1);
             Value objectValue = peek(vm, 2);
@@ -2245,7 +2309,8 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame, Async
                 RUNTIME_ERROR("Can only slice on lists and strings.");
             }
 
-            if ((!IS_NUMBER(sliceStartIndex) && !IS_EMPTY(sliceStartIndex)) || (!IS_NUMBER(sliceEndIndex) && !IS_EMPTY(sliceEndIndex))) {
+            if ((!IS_NUMBER(sliceStartIndex) && !IS_EMPTY(sliceStartIndex)) ||
+                (!IS_NUMBER(sliceEndIndex) && !IS_EMPTY(sliceEndIndex))) {
                 RUNTIME_ERROR("Slice index must be a number.");
             }
 
@@ -2264,74 +2329,79 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame, Async
             }
 
             switch (getObjType(objectValue)) {
-                case OBJ_LIST: {
-                    ObjList *createdList = newList(vm);
-                    push(vm, OBJ_VAL(createdList));
-                    ObjList *list = AS_LIST(objectValue);
+            case OBJ_LIST: {
+                ObjList *createdList = newList(vm);
+                push(vm, OBJ_VAL(createdList));
+                ObjList *list = AS_LIST(objectValue);
 
-                    if (IS_EMPTY(sliceEndIndex)) {
+                if (IS_EMPTY(sliceEndIndex)) {
+                    indexEnd = list->values.count;
+                } else {
+                    indexEnd = AS_NUMBER(sliceEndIndex);
+
+                    if (indexEnd > list->values.count) {
                         indexEnd = list->values.count;
-                    } else {
-                        indexEnd = AS_NUMBER(sliceEndIndex);
-
-                        if (indexEnd > list->values.count) {
-                            indexEnd = list->values.count;
-                        } else if (indexEnd < 0) {
-                            indexEnd = list->values.count + indexEnd;
-                        }
+                    } else if (indexEnd < 0) {
+                        indexEnd = list->values.count + indexEnd;
                     }
-
-                    for (int i = indexStart; i < indexEnd; i++) {
-                        writeValueArray(vm, &createdList->values, list->values.values[i]);
-                    }
-
-                    pop(vm);
-                    returnVal = OBJ_VAL(createdList);
-
-                    break;
                 }
 
-                case OBJ_STRING: {
-                    ObjString *string = AS_STRING(objectValue);
-                    int len = string->character_len == -1 ? string->length : string->character_len;
+                for (int i = indexStart; i < indexEnd; i++) {
+                    writeValueArray(vm, &createdList->values,
+                                    list->values.values[i]);
+                }
 
-                    if (IS_EMPTY(sliceEndIndex)) {
+                pop(vm);
+                returnVal = OBJ_VAL(createdList);
+
+                break;
+            }
+
+            case OBJ_STRING: {
+                ObjString *string = AS_STRING(objectValue);
+                int len = string->character_len == -1 ? string->length
+                                                      : string->character_len;
+
+                if (IS_EMPTY(sliceEndIndex)) {
+                    indexEnd = len;
+                } else {
+                    indexEnd = AS_NUMBER(sliceEndIndex);
+
+                    if (indexEnd > len) {
                         indexEnd = len;
-                    } else {
-                        indexEnd = AS_NUMBER(sliceEndIndex);
-
-                        if (indexEnd > len) {
-                            indexEnd = len;
-                        }  else if (indexEnd < 0) {
-                            indexEnd = len + indexEnd;
-                        }
+                    } else if (indexEnd < 0) {
+                        indexEnd = len + indexEnd;
                     }
+                }
 
-                    // Ensure the start index is below the end index
-                    if (indexStart > indexEnd) {
-                        returnVal = OBJ_VAL(copyString(vm, "", 0));
-                    } else {
-                        if(string->character_len != -1 && string->character_len != string->length) {
-                            utf8_int32_t ch;
-                            char* ptr = string->chars;
+                // Ensure the start index is below the end index
+                if (indexStart > indexEnd) {
+                    returnVal = OBJ_VAL(copyString(vm, "", 0));
+                } else {
+                    if (string->character_len != -1 &&
+                        string->character_len != string->length) {
+                        utf8_int32_t ch;
+                        char *ptr = string->chars;
                         // first we need to advance by the skip;
-                            for(size_t i = 0; i < (size_t)indexStart; i++)
-                                ptr = utf8codepoint(ptr, &ch);
-                            char* ptrEnd = ptr;
-                            for(size_t i = 0; i < (size_t)(indexEnd - indexStart); i++)
-                                ptrEnd = utf8codepoint(ptrEnd, &ch);
-                            returnVal = OBJ_VAL(copyString(vm, ptr, ptrEnd - ptr));
-                        } else {
-                            returnVal = OBJ_VAL(copyString(vm, string->chars + indexStart, indexEnd - indexStart));
-                        }
-
+                        for (size_t i = 0; i < (size_t)indexStart; i++)
+                            ptr = utf8codepoint(ptr, &ch);
+                        char *ptrEnd = ptr;
+                        for (size_t i = 0; i < (size_t)(indexEnd - indexStart);
+                             i++)
+                            ptrEnd = utf8codepoint(ptrEnd, &ch);
+                        returnVal = OBJ_VAL(copyString(vm, ptr, ptrEnd - ptr));
+                    } else {
+                        returnVal =
+                            OBJ_VAL(copyString(vm, string->chars + indexStart,
+                                               indexEnd - indexStart));
                     }
-                    break;
                 }
+                break;
+            }
 
-                default: {
-                    RUNTIME_ERROR_TYPE("'%s' does not support item assignment", 2);
-                }
+            default: {
+                RUNTIME_ERROR_TYPE("'%s' does not support item assignment", 2);
+            }
             }
 
             pop(vm);
@@ -2342,7 +2412,7 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame, Async
             DISPATCH();
         }
 
-        CASE_CODE(CALL): {
+        CASE_CODE(CALL) : {
             int argCount = READ_BYTE();
             bool unpack = READ_BYTE();
             bool await = READ_BYTE();
@@ -2352,43 +2422,44 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame, Async
                 return INTERPRET_RUNTIME_ERROR;
             }
 
-            if(await) {
+            if (await) {
                 Value target = pop(vm);
                 vm->stackTop -= 1 + argCount;
                 assert(IS_FUTURE(target));
-                assert(frame->closure->function && frame->closure->function->async);
+                assert(frame->closure->function &&
+                       frame->closure->function->async);
 
-                                push(vm, target);
+                push(vm, target);
 
-                frame->slots = vm->stackTop -4;
-                AsyncContext* ctx = copyVmState(vm);
-                if(targetContext->result)
+                frame->slots = vm->stackTop - 4;
+                AsyncContext *ctx = copyVmState(vm);
+                if (targetContext->result)
                     ctx->result = targetContext->result;
-                ctx->breakFrame = vm->frameCount-1;
-                ObjFuture* future = AS_FUTURE(target);
-                Task* t = createTask(vm, true);
+                ctx->breakFrame = vm->frameCount - 1;
+                ObjFuture *future = AS_FUTURE(target);
+                Task *t = createTask(vm, true);
                 t->waitFor = future;
                 t->asyncContext = ctx;
                 return INTERPRET_OK;
 
             } else {
 
-                ObjFunction* func = NULL;
-     
-                if(IS_CLOSURE(f)) {
+                ObjFunction *func = NULL;
+
+                if (IS_CLOSURE(f)) {
                     func = AS_CLOSURE(f)->function;
                 } else if (IS_FUNCTION(f))
                     func = AS_FUNCTION(f);
-                if(func && func->async){
-                                    // vm->stackTop -= 1 + argCount;
-                } 
+                if (func && func->async) {
+                    // vm->stackTop -= 1 + argCount;
+                }
             }
-                                frame = &vm->frames[vm->frameCount - 1];
+            frame = &vm->frames[vm->frameCount - 1];
             ip = frame->ip;
             DISPATCH();
         }
 
-        CASE_CODE(INVOKE): {
+        CASE_CODE(INVOKE) : {
             int argCount = READ_BYTE();
             ObjString *method = READ_STRING();
             bool unpack = READ_BYTE();
@@ -2399,26 +2470,26 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame, Async
                 return INTERPRET_RUNTIME_ERROR;
             }
 
-            if(await) {
+            if (await) {
                 Value target = peek(vm, 0);
                 assert(IS_FUTURE(target));
-                assert(frame->closure->function && frame->closure->function->async);
-                  vm->stackTop = frame->slots;
-                AsyncContext* ctx = copyVmState(vm);
-                    frame->ip++;
-                ObjFuture* future = AS_FUTURE(target);
-                Task* t = createTask(vm, true);
+                assert(frame->closure->function &&
+                       frame->closure->function->async);
+                vm->stackTop = frame->slots;
+                AsyncContext *ctx = copyVmState(vm);
+                frame->ip++;
+                ObjFuture *future = AS_FUTURE(target);
+                Task *t = createTask(vm, true);
                 t->waitFor = future;
                 t->asyncContext = ctx;
                 return INTERPRET_OK;
-
             }
             frame = &vm->frames[vm->frameCount - 1];
             ip = frame->ip;
             DISPATCH();
         }
 
-        CASE_CODE(INVOKE_INTERNAL): {
+        CASE_CODE(INVOKE_INTERNAL) : {
             int argCount = READ_BYTE();
             ObjString *method = READ_STRING();
             bool unpack = READ_BYTE();
@@ -2429,32 +2500,33 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame, Async
                 return INTERPRET_RUNTIME_ERROR;
             }
 
-            if(await) {
+            if (await) {
                 Value target = peek(vm, 0);
                 assert(IS_FUTURE(target));
-                assert(frame->closure->function && frame->closure->function->async);
-                AsyncContext* ctx = copyVmState(vm);
+                assert(frame->closure->function &&
+                       frame->closure->function->async);
+                AsyncContext *ctx = copyVmState(vm);
                 frame->ip++;
-                ObjFuture* future = AS_FUTURE(target);
-                Task* t = createTask(vm, true);
+                ObjFuture *future = AS_FUTURE(target);
+                Task *t = createTask(vm, true);
                 t->waitFor = future;
                 t->asyncContext = ctx;
                 return INTERPRET_OK;
-
             }
             frame = &vm->frames[vm->frameCount - 1];
             ip = frame->ip;
             DISPATCH();
         }
 
-        CASE_CODE(SUPER): {
+        CASE_CODE(SUPER) : {
             int argCount = READ_BYTE();
             ObjString *method = READ_STRING();
             bool unpack = READ_BYTE();
 
             frame->ip = ip;
             ObjClass *superclass = AS_CLASS(pop(vm));
-            if (!invokeFromClass(vm, superclass, method, argCount, unpack, false)) {
+            if (!invokeFromClass(vm, superclass, method, argCount, unpack,
+                                 false)) {
                 return INTERPRET_RUNTIME_ERROR;
             }
             frame = &vm->frames[vm->frameCount - 1];
@@ -2462,7 +2534,7 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame, Async
             DISPATCH();
         }
 
-        CASE_CODE(CLOSURE): {
+        CASE_CODE(CLOSURE) : {
             ObjFunction *function = AS_FUNCTION(READ_CONSTANT());
 
             // Create the closure and push it on the stack before creating
@@ -2477,7 +2549,8 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame, Async
                 if (isLocal) {
                     // Make an new upvalue to close over the parent's local
                     // variable.
-                    closure->upvalues[i] = captureUpvalue(vm, frame->slots + index);
+                    closure->upvalues[i] =
+                        captureUpvalue(vm, frame->slots + index);
                 } else {
                     // Use the same upvalue as the current call frame.
                     closure->upvalues[i] = frame->closure->upvalues[index];
@@ -2487,13 +2560,13 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame, Async
             DISPATCH();
         }
 
-        CASE_CODE(CLOSE_UPVALUE): {
+        CASE_CODE(CLOSE_UPVALUE) : {
             closeUpvalues(vm, vm->stackTop - 1);
             pop(vm);
             DISPATCH();
         }
 
-        CASE_CODE(RETURN): {
+        CASE_CODE(RETURN) : {
             Value result = pop(vm);
 
             // Close any upvalues still in scope.
@@ -2512,9 +2585,9 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame, Async
             frame = &vm->frames[vm->frameCount - 1];
             ip = frame->ip;
             if (breakFrame != -1 && vm->frameCount == breakFrame) {
-                if(targetContext && targetContext->result ){
-                    ObjFuture* targetFuture = targetContext->result;
-                    if(targetFuture->pending) {
+                if (targetContext && targetContext->result) {
+                    ObjFuture *targetFuture = targetContext->result;
+                    if (targetFuture->pending) {
                         targetFuture->pending = false;
                         targetFuture->result = result;
                     }
@@ -2525,13 +2598,13 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame, Async
             DISPATCH();
         }
 
-        CASE_CODE(CLASS): {
+        CASE_CODE(CLASS) : {
             ClassType type = READ_BYTE();
             createClass(vm, READ_STRING(), NULL, type);
             DISPATCH();
         }
 
-        CASE_CODE(SUBCLASS): {
+        CASE_CODE(SUBCLASS) : {
             ClassType type = READ_BYTE();
 
             Value superclass = peek(vm, 0);
@@ -2547,7 +2620,7 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame, Async
             DISPATCH();
         }
 
-        CASE_CODE(DEFINE_CLASS_ANNOTATIONS): {
+        CASE_CODE(DEFINE_CLASS_ANNOTATIONS) : {
             ObjDict *dict = AS_DICT(READ_CONSTANT());
             ObjClass *klass = AS_CLASS(peek(vm, 0));
 
@@ -2560,10 +2633,10 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame, Async
             DISPATCH();
         }
 
-        CASE_CODE(DEFINE_METHOD_ANNOTATIONS): {
+        CASE_CODE(DEFINE_METHOD_ANNOTATIONS) : {
             ObjDict *dict = AS_DICT(READ_CONSTANT());
             ObjClass *klass = AS_CLASS(peek(vm, 0));
-            
+
             if (klass->methodAnnotations != NULL) {
                 copyAnnotations(vm, klass->methodAnnotations, dict);
             }
@@ -2573,7 +2646,7 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame, Async
             DISPATCH();
         }
 
-        CASE_CODE(DEFINE_FIELD_ANNOTATIONS): {
+        CASE_CODE(DEFINE_FIELD_ANNOTATIONS) : {
             ObjDict *dict = AS_DICT(READ_CONSTANT());
             ObjClass *klass = AS_CLASS(peek(vm, 0));
 
@@ -2586,34 +2659,38 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame, Async
             DISPATCH();
         }
 
-        CASE_CODE(END_CLASS): {
+        CASE_CODE(END_CLASS) : {
             ObjClass *klass = AS_CLASS(peek(vm, 0));
 
-            // If super class is abstract, ensure we have defined all abstract methods
+            // If super class is abstract, ensure we have defined all abstract
+            // methods
             for (int i = 0; i < klass->abstractMethods.capacity; i++) {
                 if (klass->abstractMethods.entries[i].key == NULL) {
                     continue;
                 }
 
                 Value _;
-                if (!tableGet(&klass->publicMethods, klass->abstractMethods.entries[i].key, &_)) {
-                    RUNTIME_ERROR("Class %s does not implement abstract method %s", klass->name->chars, klass->abstractMethods.entries[i].key->chars);
+                if (!tableGet(&klass->publicMethods,
+                              klass->abstractMethods.entries[i].key, &_)) {
+                    RUNTIME_ERROR(
+                        "Class %s does not implement abstract method %s",
+                        klass->name->chars,
+                        klass->abstractMethods.entries[i].key->chars);
                 }
             }
             DISPATCH();
         }
 
-        CASE_CODE(METHOD):
-            defineMethod(vm, READ_STRING());
-            DISPATCH();
+        CASE_CODE(METHOD) : defineMethod(vm, READ_STRING());
+        DISPATCH();
 
-        CASE_CODE(ENUM): {
+        CASE_CODE(ENUM) : {
             ObjEnum *enumObj = newEnum(vm, READ_STRING());
             push(vm, OBJ_VAL(enumObj));
             DISPATCH();
         }
 
-        CASE_CODE(SET_ENUM_VALUE): {
+        CASE_CODE(SET_ENUM_VALUE) : {
             Value value = peek(vm, 0);
             ObjEnum *enumObj = AS_ENUM(peek(vm, 1));
 
@@ -2622,7 +2699,7 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame, Async
             DISPATCH();
         }
 
-        CASE_CODE(USE): {
+        CASE_CODE(USE) : {
             Value trait = peek(vm, 0);
             if (!IS_TRAIT(trait)) {
                 RUNTIME_ERROR("Can only 'use' with a trait");
@@ -2630,13 +2707,14 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame, Async
 
             ObjClass *klass = AS_CLASS(peek(vm, 1));
 
-            tableAddAll(vm, &AS_CLASS(trait)->publicMethods, &klass->publicMethods);
+            tableAddAll(vm, &AS_CLASS(trait)->publicMethods,
+                        &klass->publicMethods);
             pop(vm); // pop the trait
 
             DISPATCH();
         }
 
-        CASE_CODE(OPEN_FILE): {
+        CASE_CODE(OPEN_FILE) : {
             Value openType = peek(vm, 0);
             Value fileName = peek(vm, 1);
 
@@ -2666,7 +2744,7 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame, Async
             DISPATCH();
         }
 
-        CASE_CODE(CLOSE_FILE): {
+        CASE_CODE(CLOSE_FILE) : {
             uint8_t slot = READ_BYTE();
             Value file = frame->slots[slot];
             ObjFile *fileObject = AS_FILE(file);
@@ -2692,34 +2770,34 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame, Async
 //     return runWithBreakFrame(vm, -1, NULL);
 // }
 
-static DictuInterpretResult runEventLoop(DictuVM* vm) {
-    while(true) {
-        Task* t = popTask(vm, true);
-        if(t == NULL)
+static DictuInterpretResult runEventLoop(DictuVM *vm) {
+    while (true) {
+        Task *t = popTask(vm, true);
+        if (t == NULL)
             break;
 
-        if(t->frame) {
+        if (t->frame) {
             printf("%d\n", vm->frameCount);
-             CallFrame current = vm->frames[vm->frameCount-1];
-            vm->frames[vm->frameCount-1] = *t->frame;
+            CallFrame current = vm->frames[vm->frameCount - 1];
+            vm->frames[vm->frameCount - 1] = *t->frame;
             DictuInterpretResult result = runWithBreakFrame(vm, -1, NULL);
-            if(result != INTERPRET_OK)
+            if (result != INTERPRET_OK)
                 return result;
-            if(vm->frameCount > 0)
-             vm->frames[vm->frameCount-1] = current;
-        } else if (t->asyncContext){
-            if(t->waitFor && t->waitFor->pending){
-                Task* newTask = createTask(vm, true);
+            if (vm->frameCount > 0)
+                vm->frames[vm->frameCount - 1] = current;
+        } else if (t->asyncContext) {
+            if (t->waitFor && t->waitFor->pending) {
+                Task *newTask = createTask(vm, true);
                 newTask->waitFor = t->waitFor;
                 newTask->asyncContext = t->asyncContext;
             } else {
                 // execute
-                 Value* localStack = vm->stack;
-                int stackTopCurrent = vm->stackTop-vm->stack;
-                 CallFrame* frames = vm->frames;
-                 ObjUpvalue* upValues = vm->openUpvalues;
-                 int frameCount = vm->frameCount;
-                 int frameCapacity = vm->frameCapacity;
+                Value *localStack = vm->stack;
+                int stackTopCurrent = vm->stackTop - vm->stack;
+                CallFrame *frames = vm->frames;
+                ObjUpvalue *upValues = vm->openUpvalues;
+                int frameCount = vm->frameCount;
+                int frameCapacity = vm->frameCapacity;
                 vm->stack = t->asyncContext->stack;
                 vm->stackTop = vm->stack + t->asyncContext->stackSize;
                 vm->frames = t->asyncContext->frames;
@@ -2727,11 +2805,11 @@ static DictuInterpretResult runEventLoop(DictuVM* vm) {
                 vm->frameCount = t->asyncContext->frameCount;
                 vm->asyncContextInScope = t->asyncContext;
                 vm->openUpvalues = t->asyncContext->openUpvalues;
-                if(t->waitFor && !t->waitFor->pending) {
+                if (t->waitFor && !t->waitFor->pending) {
                     Value v = peek(vm, 0);
-                    if(IS_FUTURE(v)){
-                        ObjFuture* vv = AS_FUTURE(v);
-                        if(vv == t->waitFor && vv->isAwait)
+                    if (IS_FUTURE(v)) {
+                        ObjFuture *vv = AS_FUTURE(v);
+                        if (vv == t->waitFor && vv->isAwait)
                             pop(vm);
                     }
                     push(vm, t->waitFor->result);
@@ -2743,26 +2821,28 @@ static DictuInterpretResult runEventLoop(DictuVM* vm) {
                 //     printf("%p: %s\n", ptr, vv);
                 //     free(vv);
                 // }
-                //           for(Value* ptr = vm->frames[vm->frameCount-1].slots; ptr < vm->stackTop; ptr++){
+                //           for(Value* ptr =
+                //           vm->frames[vm->frameCount-1].slots; ptr <
+                //           vm->stackTop; ptr++){
                 //             if(ptr == NULL)
                 //                 break;
                 //     printf("SLOT %p: %s\n", ptr, valueToString(*ptr));
                 // }
-                  DictuInterpretResult result = runWithBreakFrame(vm, t->asyncContext->breakFrame, t->asyncContext);
-                
-                if(result != INTERPRET_OK)
+                DictuInterpretResult result = runWithBreakFrame(
+                    vm, t->asyncContext->breakFrame, t->asyncContext);
+
+                if (result != INTERPRET_OK)
                     return result;
                 t->asyncContext->refs--;
-                  vm->asyncContextInScope = NULL;
-                 vm->stack = localStack;
-                 vm->stackTop = vm->stack + stackTopCurrent;
-                 vm->frames = frames;
-                 vm->frameCount = frameCount;
-                 vm->frameCapacity = frameCapacity;
-                 vm->openUpvalues = upValues;
+                vm->asyncContextInScope = NULL;
+                vm->stack = localStack;
+                vm->stackTop = vm->stack + stackTopCurrent;
+                vm->frames = frames;
+                vm->frameCount = frameCount;
+                vm->frameCapacity = frameCapacity;
+                vm->openUpvalues = upValues;
 
-
-                    releaseAsyncContext(vm, t->asyncContext);
+                releaseAsyncContext(vm, t->asyncContext);
             }
         }
         collectGarbage(vm);
@@ -2772,7 +2852,8 @@ static DictuInterpretResult runEventLoop(DictuVM* vm) {
     return INTERPRET_OK;
 }
 
-DictuInterpretResult dictuInterpret(DictuVM *vm, char *moduleName, char *source) {
+DictuInterpretResult dictuInterpret(DictuVM *vm, char *moduleName,
+                                    char *source) {
     ObjString *name = copyString(vm, moduleName, strlen(moduleName));
     push(vm, OBJ_VAL(name));
     ObjModule *module = newModule(vm, name);
@@ -2783,23 +2864,23 @@ DictuInterpretResult dictuInterpret(DictuVM *vm, char *moduleName, char *source)
     pop(vm);
 
     ObjFunction *function = compile(vm, module, source);
-    if (function == NULL) return INTERPRET_COMPILE_ERROR;
+    if (function == NULL)
+        return INTERPRET_COMPILE_ERROR;
     push(vm, OBJ_VAL(function));
     ObjClosure *closure = newClosure(vm, function);
     pop(vm);
     push(vm, OBJ_VAL(closure));
     callValue(vm, OBJ_VAL(closure), 0, false, false);
-            Task* task = createTask(vm, false);
-        task->frame = &vm->frames[vm->frameCount-1];
+    Task *task = createTask(vm, false);
+    task->frame = &vm->frames[vm->frameCount - 1];
     DictuInterpretResult result = runEventLoop(vm);
 
     return result;
 }
 
-
-Value callFunction(DictuVM* vm, Value function, int argCount, Value* args) {
-    if(!IS_FUNCTION(function) && !IS_CLOSURE(function)){
-        if(IS_NATIVE(function)) {
+Value callFunction(DictuVM *vm, Value function, int argCount, Value *args) {
+    if (!IS_FUNCTION(function) && !IS_CLOSURE(function)) {
+        if (IS_NATIVE(function)) {
             NativeFn native = AS_NATIVE(function);
             return native(vm, argCount, args);
         }
@@ -2807,12 +2888,12 @@ Value callFunction(DictuVM* vm, Value function, int argCount, Value* args) {
         return EMPTY_VAL;
     }
     int currentFrameCount = vm->frameCount;
-    Value* currentStack = vm->stackTop;
+    Value *currentStack = vm->stackTop;
     if (vm->frameCount == vm->frameCapacity) {
         int oldCapacity = vm->frameCapacity;
         vm->frameCapacity = GROW_CAPACITY(vm->frameCapacity);
-        vm->frames = GROW_ARRAY(vm, vm->frames, CallFrame,
-                                   oldCapacity, vm->frameCapacity);
+        vm->frames = GROW_ARRAY(vm, vm->frames, CallFrame, oldCapacity,
+                                vm->frameCapacity);
     }
     CallFrame *frame = &vm->frames[vm->frameCount++];
     uint8_t code[4] = {OP_CALL, argCount, 0, OP_RETURN};
@@ -2820,11 +2901,12 @@ Value callFunction(DictuVM* vm, Value function, int argCount, Value* args) {
     frame->closure = NULL;
     frame->asynContextCreated = 0;
     push(vm, function);
-    for(int i = 0; i < argCount; i++) {
+    for (int i = 0; i < argCount; i++) {
         push(vm, args[i]);
     }
-    DictuInterpretResult result = runWithBreakFrame(vm, currentFrameCount+1, NULL);
-    if(result != INTERPRET_OK) {
+    DictuInterpretResult result =
+        runWithBreakFrame(vm, currentFrameCount + 1, NULL);
+    if (result != INTERPRET_OK) {
         exit(70);
     }
     Value v = pop(vm);
