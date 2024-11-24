@@ -5,6 +5,7 @@
 #include "common.h"
 #include "compiler.h"
 #include "memory.h"
+#include "scanner.h"
 #include "vm.h"
 #include "error_lib/error.h"
 #include "../optionals/optionals.h"
@@ -155,7 +156,7 @@ static void patchJump(Compiler *compiler, int offset) {
     currentChunk(compiler)->code[offset + 1] = jump & 0xff;
 }
 
-static void initCompiler(Parser *parser, Compiler *compiler, Compiler *parent, FunctionType type, AccessLevel level) {
+static void initCompiler(Parser *parser, Compiler *compiler, Compiler *parent, FunctionType type, AccessLevel level, bool isAsync) {
     compiler->parser = parser;
     compiler->enclosing = parent;
     initTable(&compiler->stringConstants);
@@ -165,6 +166,7 @@ static void initCompiler(Parser *parser, Compiler *compiler, Compiler *parent, F
     compiler->classAnnotations = NULL;
     compiler->methodAnnotations = NULL;
     compiler->fieldAnnotations = NULL;
+    compiler->await = false;
     memset(compiler->locals, 0, sizeof(Local) * UINT8_COUNT);
 
     if (parent != NULL) {
@@ -177,7 +179,7 @@ static void initCompiler(Parser *parser, Compiler *compiler, Compiler *parent, F
 
     parser->vm->compiler = compiler;
 
-    compiler->function = newFunction(parser->vm, parser->module, type, level);
+    compiler->function = newFunction(parser->vm, parser->module, type, level, isAsync);
 
     switch (type) {
         case TYPE_INITIALIZER:
@@ -678,7 +680,7 @@ static void call(Compiler *compiler, LangToken previousToken, bool canAssign) {
     int argCount = argumentList(compiler, &unpack);
 
     emitBytes(compiler, OP_CALL, argCount);
-    emitByte(compiler, unpack);
+    emitBytes(compiler, unpack, compiler->await);
 }
 
 static bool privatePropertyExists(LangToken name, Compiler *compiler) {
@@ -707,8 +709,10 @@ static void dot(Compiler *compiler, LangToken previousToken, bool canAssign) {
         }
 
         emitBytes(compiler, name, unpack);
+        emitByte(compiler, compiler->await);
         return;
     }
+
 
     if (compiler->class != NULL && (previousToken.type == TOKEN_THIS &&
                                     privatePropertyExists(identifier, compiler))) {
@@ -833,8 +837,9 @@ static void block(Compiler *compiler) {
     consume(compiler, TOKEN_RIGHT_BRACE, "Expect '}' after block.");
 }
 
-static void beginFunction(Compiler *compiler, Compiler *fnCompiler, FunctionType type, AccessLevel level) {
-    initCompiler(compiler->parser, fnCompiler, compiler, type, level);
+static void beginFunction(Compiler *compiler, Compiler *fnCompiler, FunctionType type, AccessLevel level, bool isAsync) {
+    initCompiler(compiler->parser, fnCompiler, compiler, type, level,isAsync);
+    
     beginScope(fnCompiler);
 
     // Compile the parameter list.
@@ -951,7 +956,29 @@ static void arrow(Compiler *compiler, bool canAssign) {
     Compiler fnCompiler;
 
     // Setup function and parse parameters
-    beginFunction(compiler, &fnCompiler, TYPE_ARROW_FUNCTION, ACCESS_PUBLIC);
+    beginFunction(compiler, &fnCompiler, TYPE_ARROW_FUNCTION, ACCESS_PUBLIC, false);
+
+    consume(&fnCompiler, TOKEN_ARROW, "Expect '=>' after function arguments.");
+
+    if (match(&fnCompiler, TOKEN_LEFT_BRACE)) {
+        // Brace so expend function body
+        block(&fnCompiler);
+    } else {
+        // No brace so expect single expression
+        expression(&fnCompiler);
+        emitByte(&fnCompiler, OP_RETURN);
+    }
+    endCompiler(&fnCompiler);
+}
+static void asyncArrow(Compiler *compiler, bool canAssign) {
+    UNUSED(canAssign);
+
+        consume(compiler, TOKEN_DEF, "Expect def after function async.");
+
+    Compiler fnCompiler;
+
+    // Setup function and parse parameters
+    beginFunction(compiler, &fnCompiler, TYPE_ARROW_FUNCTION, ACCESS_PUBLIC, true);
 
     consume(&fnCompiler, TOKEN_ARROW, "Expect '=>' after function arguments.");
 
@@ -1474,6 +1501,13 @@ static void unary(Compiler *compiler, bool canAssign) {
     }
 }
 
+static void await(Compiler *compiler, bool canAssign) {
+    UNUSED(canAssign);
+    compiler->await = true;
+    expression(compiler);
+    compiler->await = false;
+}
+
 ParseRule rules[] = {
         {grouping, call,      PREC_CALL},               // TOKEN_LEFT_PAREN
         {NULL,     NULL,      PREC_NONE},               // TOKEN_RIGHT_PAREN
@@ -1550,6 +1584,8 @@ ParseRule rules[] = {
         {NULL,     NULL,      PREC_NONE},               // TOKEN_EOF
         {NULL,     NULL,      PREC_NONE},               // TOKEN_IMPORT
         {NULL,     NULL,      PREC_NONE},               // TOKEN_FROM
+        {asyncArrow,     NULL,      PREC_NONE},               // TOKEN_ASYNC
+        {await,     NULL,      PREC_CALL},               // TOKEN_AWAIT
         {NULL,     NULL,      PREC_NONE},               // TOKEN_ERROR
 };
 
@@ -1587,11 +1623,11 @@ void expression(Compiler *compiler) {
     parsePrecedence(compiler, PREC_ASSIGNMENT);
 }
 
-static void function(Compiler *compiler, FunctionType type, AccessLevel level) {
+static void function(Compiler *compiler, FunctionType type, AccessLevel level, bool async) {
     Compiler fnCompiler;
 
     // Setup function and parse parameters
-    beginFunction(compiler, &fnCompiler, type, level);
+    beginFunction(compiler, &fnCompiler, type, level, async);
 
     // The body.
     consume(&fnCompiler, TOKEN_LEFT_BRACE, "Expect '{' before function body.");
@@ -1630,6 +1666,9 @@ static void method(Compiler *compiler, bool private, LangToken *identifier, bool
 
         type = TYPE_ABSTRACT;
     }
+    bool async = false;
+    if(match(compiler, TOKEN_ASYNC))
+        async = true;
 
     if (identifier == NULL) {
         consume(compiler, TOKEN_IDENTIFIER, "Expect method name.");
@@ -1656,12 +1695,12 @@ static void method(Compiler *compiler, bool private, LangToken *identifier, bool
     }
 
     if (type != TYPE_ABSTRACT) {
-        function(compiler, type, level);
+        function(compiler, type, level, async);
     } else {
         Compiler fnCompiler;
 
         // Setup function and parse parameters
-        beginFunction(compiler, &fnCompiler, TYPE_ABSTRACT, ACCESS_PUBLIC);
+        beginFunction(compiler, &fnCompiler, TYPE_ABSTRACT, ACCESS_PUBLIC, async);
         endCompiler(&fnCompiler);
 
         if (check(compiler, TOKEN_LEFT_BRACE)) {
@@ -2139,9 +2178,12 @@ static void enumDeclaration(Compiler *compiler) {
     defineVariable(compiler, nameConstant, false);
 }
 
-static void funDeclaration(Compiler *compiler) {
+static void funDeclaration(Compiler *compiler, bool async) {
+    if(async) {
+            consume(compiler, TOKEN_DEF, "Expect def after async body.");
+    }
     uint8_t global = parseVariable(compiler, "Expect function name.", false);
-    function(compiler, TYPE_FUNCTION, ACCESS_PUBLIC);
+    function(compiler, TYPE_FUNCTION, ACCESS_PUBLIC, async);
     defineVariable(compiler, global, false);
 }
 
@@ -2882,8 +2924,10 @@ static void declaration(Compiler *compiler) {
     } else if (match(compiler, TOKEN_ABSTRACT)) {
         abstractClassDeclaration(compiler);
     } else if (match(compiler, TOKEN_DEF)) {
-        funDeclaration(compiler);
-    } else if (match(compiler, TOKEN_VAR)) {
+        funDeclaration(compiler, false);
+    } else if (match(compiler, TOKEN_ASYNC)) {
+        funDeclaration(compiler, true);
+    }  else if (match(compiler, TOKEN_VAR)) {
         varDeclaration(compiler, false);
     } else if (match(compiler, TOKEN_CONST)) {
         varDeclaration(compiler, true);
@@ -2978,7 +3022,7 @@ ObjFunction *compile(DictuVM *vm, ObjModule *module, const char *source) {
     parser.scanner = scanner;
 
     Compiler compiler;
-    initCompiler(&parser, &compiler, NULL, TYPE_TOP_LEVEL, ACCESS_PUBLIC);
+    initCompiler(&parser, &compiler, NULL, TYPE_TOP_LEVEL, ACCESS_PUBLIC, false);
 
     advance(compiler.parser);
 

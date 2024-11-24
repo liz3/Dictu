@@ -12,6 +12,7 @@ typedef struct sObjSet  ObjSet;
 typedef struct sObjFile ObjFile;
 typedef struct sObjAbstract ObjAbstract;
 typedef struct sObjResult ObjResult;
+typedef struct sObjFuture ObjFuture;
 
 // A mask that selects the sign bit.
 #define SIGN_BIT ((uint64_t)1 << 63)

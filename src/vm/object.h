@@ -28,6 +28,7 @@
 #define AS_FILE(value)          ((ObjFile*)AS_OBJ(value))
 #define AS_ABSTRACT(value)      ((ObjAbstract*)AS_OBJ(value))
 #define AS_RESULT(value)        ((ObjResult*)AS_OBJ(value))
+#define AS_FUTURE(value)        ((ObjFuture*)AS_OBJ(value))
 
 #define IS_MODULE(value)          isObjType(value, OBJ_MODULE)
 #define IS_BOUND_METHOD(value)    isObjType(value, OBJ_BOUND_METHOD)
@@ -46,6 +47,7 @@
 #define IS_FILE(value)            isObjType(value, OBJ_FILE)
 #define IS_ABSTRACT(value)        isObjType(value, OBJ_ABSTRACT)
 #define IS_RESULT(value)          isObjType(value, OBJ_RESULT)
+#define IS_FUTURE(value)          isObjType(value, OBJ_FUTURE)
 
 typedef enum {
     OBJ_MODULE,
@@ -63,7 +65,8 @@ typedef enum {
     OBJ_FILE,
     OBJ_ABSTRACT,
     OBJ_RESULT,
-    OBJ_UPVALUE
+    OBJ_UPVALUE,
+    OBJ_FUTURE,
 } ObjType;
 
 typedef enum {
@@ -117,6 +120,7 @@ typedef struct {
     int privatePropertyCount;
     int *privatePropertyNames;
     int *privatePropertyIndexes;
+    bool async;
 } ObjFunction;
 
 typedef Value (*NativeFn)(DictuVM *vm, int argCount, Value *args);
@@ -171,6 +175,7 @@ struct sObjFile {
     char *openType;
 };
 
+
 typedef void (*AbstractFreeFn)(DictuVM *vm, ObjAbstract *abstract);
 typedef void (*AbstractGrayFn)(DictuVM *vm, ObjAbstract *abstract);
 typedef char* (*AbstractTypeFn)(ObjAbstract *abstract);
@@ -194,6 +199,13 @@ struct sObjResult {
     Obj obj;
     ResultStatus status;
     Value value;
+};
+
+struct sObjFuture {
+    Obj obj;
+    bool pending;
+    bool isAwait;
+    Value result;
 };
 
 typedef struct sUpvalue {
@@ -264,7 +276,7 @@ ObjEnum *newEnum(DictuVM *vm, ObjString *name);
 
 ObjClosure *newClosure(DictuVM *vm, ObjFunction *function);
 
-ObjFunction *newFunction(DictuVM *vm, ObjModule *module, FunctionType type, AccessLevel level);
+ObjFunction *newFunction(DictuVM *vm, ObjModule *module, FunctionType type, AccessLevel level, bool isAsync);
 
 ObjInstance *newInstance(DictuVM *vm, ObjClass *klass);
 
@@ -283,6 +295,8 @@ ObjDict *newDict(DictuVM *vm);
 ObjSet *newSet(DictuVM *vm);
 
 ObjFile *newFile(DictuVM *vm);
+
+ObjFuture *newFuture(DictuVM* vm);
 
 ObjAbstract *newAbstract(DictuVM *vm, AbstractFreeFn func, AbstractTypeFn type);
 ObjAbstract *newAbstractExcludeSelf(DictuVM *vm, AbstractFreeFn func, AbstractTypeFn type);

@@ -3,6 +3,7 @@
 #include "common.h"
 #include "compiler.h"
 #include "memory.h"
+#include "object.h"
 #include "vm.h"
 
 #ifdef DEBUG_TRACE_GC
@@ -19,15 +20,6 @@ void *reallocate(DictuVM *vm, void *previous, size_t oldSize, size_t newSize) {
     printf("Total bytes allocated: %zu\nNew allocation: %zu\nOld allocation: %zu\n\n", vm->bytesAllocated, newSize, oldSize);
 #endif
 
-    if (newSize > oldSize) {
-#ifdef DEBUG_STRESS_GC
-        collectGarbage(vm);
-#endif
-
-        if (vm->bytesAllocated > vm->nextGC) {
-            collectGarbage(vm);
-        }
-    }
 
     if (newSize == 0) {
         free(previous);
@@ -183,6 +175,7 @@ static void blackenObject(DictuVM *vm, Obj *object) {
         case OBJ_NATIVE:
         case OBJ_STRING:
         case OBJ_FILE:
+        case OBJ_FUTURE:
             break;
     }
 }
@@ -292,6 +285,10 @@ void freeObject(DictuVM *vm, Obj *object) {
             FREE(vm, ObjFile, object);
             break;
         }
+        case OBJ_FUTURE: {
+            FREE(vm, ObjFuture, object);
+            break;
+        }
 
         case OBJ_UPVALUE: {
             FREE(vm, ObjUpvalue, object);
@@ -314,6 +311,8 @@ void freeObject(DictuVM *vm, Obj *object) {
 }
 
 void collectGarbage(DictuVM *vm) {
+    if(vm->taskCount > 0)
+        return;
 #ifdef DEBUG_TRACE_GC
     printf("-- gc begin\n");
     size_t before = vm->bytesAllocated;
@@ -382,6 +381,8 @@ void collectGarbage(DictuVM *vm) {
         }
     }
 
+    for(int i = 0; i < vm->asyncContextCount; i++)
+        releaseAsyncContext(vm, vm->asyncContexts[i]);
     // Adjust the heap size based on live memory.
     vm->nextGC = vm->bytesAllocated * GC_HEAP_GROW_FACTOR;
 

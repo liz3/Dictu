@@ -13,14 +13,42 @@ typedef struct {
     ObjClosure *closure;
     uint8_t *ip;
     Value *slots;
+    int asynContextCreated;
 } CallFrame;
+
+typedef struct asyncContext {
+     CallFrame *frames;
+     int frameCount;
+     int frameCapacity;
+     ObjFuture* result;
+     int breakFrame;
+     Value stack[STACK_MAX];
+     int stackSize;
+     bool noPush;
+     bool needsCall;
+     ObjUpvalue *openUpvalues;
+     struct asyncContext* ref;
+     int refs;
+} AsyncContext;
+
+
+typedef struct {
+    CallFrame *frame;
+    ObjFuture* waitFor;
+    AsyncContext* asyncContext;
+} Task;
 
 struct _vm {
     Compiler *compiler;
-    Value stack[STACK_MAX];
+    Value* stack;
     Value *stackTop;
     bool repl;
     CallFrame *frames;
+    AsyncContext* asyncContextInScope;
+    AsyncContext** asyncContexts;
+    Task** tasks;
+    int taskCount;
+    int asyncContextCount;
     int frameCount;
     int frameCapacity;
     ObjModule *lastModule;
@@ -36,6 +64,7 @@ struct _vm {
     Table dictMethods;
     Table setMethods;
     Table fileMethods;
+    Table futureMethods;
     Table classMethods;
     Table instanceMethods;
     Table resultMethods;
@@ -70,5 +99,10 @@ bool isFalsey(Value value);
 ObjClosure *compileModuleToClosure(DictuVM *vm, char *name, char *source);
 
 Value callFunction(DictuVM* vm, Value function, int argCount, Value* args);
+
+Task* createTask(DictuVM* vm, bool prepend);
+AsyncContext* copyVmState(DictuVM* vm);
+void releaseAsyncContext(DictuVM* vm, AsyncContext* ctx);
+
 
 #endif

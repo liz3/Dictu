@@ -104,7 +104,7 @@ ObjClosure *newClosure(DictuVM *vm, ObjFunction *function) {
     return closure;
 }
 
-ObjFunction *newFunction(DictuVM *vm, ObjModule *module, FunctionType type, AccessLevel level) {
+ObjFunction *newFunction(DictuVM *vm, ObjModule *module, FunctionType type, AccessLevel level, bool isAsync) {
     ObjFunction *function = ALLOCATE_OBJ(vm, ObjFunction, OBJ_FUNCTION);
     function->arity = 0;
     function->arityOptional = 0;
@@ -120,6 +120,7 @@ ObjFunction *newFunction(DictuVM *vm, ObjModule *module, FunctionType type, Acce
     function->type = type;
     function->accessLevel = level;
     function->module = module;
+    function->async = isAsync;
     initChunk(vm, &function->chunk);
 
     return function;
@@ -192,6 +193,13 @@ ObjSet *newSet(DictuVM *vm) {
 
 ObjFile *newFile(DictuVM *vm) {
     return ALLOCATE_OBJ(vm, ObjFile, OBJ_FILE);
+}
+
+ObjFuture *newFuture(DictuVM* vm) {
+    ObjFuture* future = ALLOCATE_OBJ(vm, ObjFuture, OBJ_FUTURE);
+    future->pending = true;
+    future->result = EMPTY_VAL;
+    return future;
 }
 
 ObjAbstract *newAbstract(DictuVM *vm, AbstractFreeFn func, AbstractTypeFn type) {
@@ -787,6 +795,14 @@ char *objectToString(Value value) {
             char *fileString = malloc(sizeof(char) * (strlen(file->path) + 8));
             snprintf(fileString, strlen(file->path) + 8, "<File %s>", file->path);
             return fileString;
+        }
+
+        case OBJ_FUTURE: {
+            ObjFuture* future = AS_FUTURE(value);
+            const char* str = future->pending ? "<Future pending>" : "<Future>";
+            char* string = malloc(strlen(str)+1);
+            memcpy(string, str, strlen(str)+1);
+            return string;
         }
 
         case OBJ_LIST: {

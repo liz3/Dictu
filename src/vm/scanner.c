@@ -148,7 +148,16 @@ static LangTokenType identifierType(Scanner *scanner) {
                     }
 
                     case 's': {
+                        if (scanner->current - scanner->start > 2) {
+                            switch(scanner->start[2]) {
+                                case 'y':
+                                    return checkKeyword(scanner, 3, 2, "nc", TOKEN_ASYNC);
+                                }
+                        }
                         return checkKeyword(scanner, 2, 0, "", TOKEN_AS);
+                    }
+                    case 'w': {
+                        return checkKeyword(scanner, 2, 3,      "ait", TOKEN_AWAIT);
                     }
                 }
             }

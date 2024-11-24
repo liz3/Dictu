@@ -105,6 +105,7 @@ typedef struct Compiler {
     ObjDict *classAnnotations;
     ObjDict *methodAnnotations;
     ObjDict *fieldAnnotations;
+    bool await;
 } Compiler;
 
 typedef void (*ParsePrefixFn)(Compiler *compiler, bool canAssign);

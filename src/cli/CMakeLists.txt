@@ -24,4 +24,6 @@ target_link_libraries(dictu dictu_api_static)
 if(LINUX AND CMAKE_C_COMPILER_ID STREQUAL "Clang")
     # Clang needs this otherwise ld will fail on linux since the lib is build with -flto
     set(CMAKE_C_FLAGS_RELEASE "-flto")
+        set(CMAKE_C_FLAGS_DEBUG "-O0 -g -fsanitize=address")
+
 endif()
