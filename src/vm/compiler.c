@@ -1584,8 +1584,9 @@ ParseRule rules[] = {
         {NULL,     NULL,      PREC_NONE},               // TOKEN_EOF
         {NULL,     NULL,      PREC_NONE},               // TOKEN_IMPORT
         {NULL,     NULL,      PREC_NONE},               // TOKEN_FROM
-        {asyncArrow,     NULL,      PREC_NONE},               // TOKEN_ASYNC
-        {await,     NULL,      PREC_CALL},               // TOKEN_AWAIT
+        {asyncArrow,NULL,     PREC_NONE},               // TOKEN_ASYNC
+        {await,    NULL,     PREC_CALL},               // TOKEN_AWAIT
+        {NULL,     NULL,      PREC_NONE},               // TOKEN_THROW
         {NULL,     NULL,      PREC_NONE},               // TOKEN_ERROR
 };
 
@@ -2815,6 +2816,15 @@ static void whileStatement(Compiler *compiler) {
     endLoop(compiler);
 }
 
+static void throwStatement(Compiler* compiler) {
+    if (!compiler->function) {
+         error(compiler->parser, "Throw statement outside of function.");
+    }
+    expression(compiler);
+    emitByte(compiler, OP_THROW);
+    consume(compiler, TOKEN_SEMICOLON, "Expect ';' after throw statement.");
+}
+
 static void unpackListStatement(Compiler *compiler){
     int varCount = 0;
     LangToken variables[255];
@@ -2957,7 +2967,9 @@ static void statement(Compiler *compiler) {
         importStatement(compiler);
     } else if (match(compiler, TOKEN_FROM)) {
         fromImportStatement(compiler);
-    } else if (match(compiler, TOKEN_BREAK)) {
+    } else if (match(compiler, TOKEN_THROW)) {
+        throwStatement(compiler);
+    }  else if (match(compiler, TOKEN_BREAK)) {
         breakStatement(compiler);
     } else if (match(compiler, TOKEN_WHILE)) {
         whileStatement(compiler);

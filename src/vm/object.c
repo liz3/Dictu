@@ -200,6 +200,7 @@ ObjFuture *newFuture(DictuVM* vm) {
     future->pending = true;
     future->isAwait = false;
     future->controlled = true;
+    future->consumed = false;
     future->result = EMPTY_VAL;
     return future;
 }

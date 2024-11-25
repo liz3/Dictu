@@ -1,11 +1,13 @@
 #include <assert.h>
 #include <math.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "../optionals/optionals.h"
+#include "chunk.h"
 #include "common.h"
 #include "compiler.h"
 #include "datatypes/bool.h"
@@ -118,9 +120,18 @@ void releaseAsyncContext(DictuVM *vm, AsyncContext *ctx) {
             ctx->ref->refs--;
         }
     }
+    FREE_ARRAY(vm, CallFrame, ctx->frames, ctx->frameCapacity);
+    while (ctx->openUpvalues != NULL) {
+        ObjUpvalue *n = ctx->openUpvalues->next;
+        FREE(vm, ObjUpvalue, ctx->openUpvalues);
+        ctx->openUpvalues = n;
+    }
+    FREE(vm, AsyncContext, ctx);
     if (vm->asyncContextCount == 1) {
+        vm->asyncContextCount--;
         FREE_ARRAY(vm, AsyncContext *, vm->asyncContexts, 1);
         vm->asyncContexts = NULL;
+        return;
     } else {
         bool f = false;
         for (int i = 0; i < vm->asyncContextCount; i++) {
@@ -138,13 +149,6 @@ void releaseAsyncContext(DictuVM *vm, AsyncContext *ctx) {
                          vm->asyncContextCount, vm->asyncContextCount - 1);
         vm->asyncContextCount--;
     }
-    FREE_ARRAY(vm, CallFrame, ctx->frames, ctx->frameCapacity);
-    while (ctx->openUpvalues != NULL) {
-        ObjUpvalue *n = ctx->openUpvalues->next;
-        FREE(vm, ObjUpvalue, ctx->openUpvalues);
-        ctx->openUpvalues = n;
-    }
-    FREE(vm, AsyncContext, ctx);
 }
 
 Task *createTask(DictuVM *vm, bool prepend) {
@@ -353,10 +357,9 @@ AsyncContext *copyVmState(DictuVM *vm) {
     memcpy(context->stack, vm->stack,
            sizeof(Value) * (vm->stackTop - vm->stack));
     for (int i = 0; i < context->frameCount; i++) {
-        int currentOffset = vm->stackTop - &(vm->frames[i].slots[0]);
-
+        int currentOffset = &(vm->frames[i].slots[0]) - vm->stack;
         Value *ptr = context->stack;
-        context->frames[i].slots = &ptr[currentOffset - 1];
+        context->frames[i].slots = &ptr[currentOffset];
     }
     context->stackSize = vm->stackTop - vm->stack;
     ObjUpvalue *upvalue = vm->openUpvalues;
@@ -439,11 +442,14 @@ static bool call(DictuVM *vm, ObjClosure *closure, int argCount, bool await) {
         AsyncContext *context = copyVmState(vm);
         context->result = newFuture(vm);
         context->result->isAwait = await;
+        context->result->consumed = await;
         context->breakFrame = vm->frameCount;
         CallFrame *frame = &context->frames[context->frameCount++];
         frame->closure = closure;
         frame->ip = closure->function->chunk.code;
-        frame->slots = (context->stack + (context->stackSize - argCount - 1));
+        frame->slots = (context->stack + (context->stackSize - (argCount + 1)));
+        assert(*frame->slots == OBJ_VAL(closure));
+        vm->stackTop = vm->stackTop - (1 + argCount);
         push(vm, OBJ_VAL(context->result));
         Task *task = createTask(vm, false);
         task->asyncContext = context;
@@ -1048,12 +1054,12 @@ static void setReplVar(DictuVM *vm, Value value) {
 static DictuInterpretResult asyncFreezeState(DictuVM *vm, int argCount,
                                              CallFrame *frame,
                                              AsyncContext *targetContext) {
-
+    UNUSED(frame);
+    UNUSED(argCount);
     Value target = pop(vm);
-    vm->stackTop -= 1 + argCount;
+
     push(vm, target);
 
-    frame->slots = vm->stackTop - 4;
     AsyncContext *ctx = copyVmState(vm);
     if (targetContext->result)
         ctx->result = targetContext->result;
@@ -2432,7 +2438,8 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame,
             bool unpack = READ_BYTE();
             bool await = READ_BYTE();
             frame->ip = ip;
-            if (!callValue(vm, peek(vm, argCount), argCount, unpack, await)) {
+            Value f = peek(vm, argCount);
+            if (!callValue(vm, f, argCount, unpack, await)) {
                 return INTERPRET_RUNTIME_ERROR;
             }
 
@@ -2560,7 +2567,46 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame,
             }
             DISPATCH();
         }
+        CASE_CODE(THROW) : {
+            Value result = pop(vm);
+            if (!IS_STRING(result)) {
+                RUNTIME_ERROR("Throw value is not a string.");
+                return INTERPRET_RUNTIME_ERROR;
+            }
 
+            // Close any upvalues still in scope.
+            closeUpvalues(vm, frame->slots);
+
+            vm->frameCount--;
+
+            if (vm->frameCount == 0) {
+                RUNTIME_ERROR(AS_CSTRING(result));
+                return INTERPRET_RUNTIME_ERROR;
+            }
+
+            vm->stackTop = frame->slots;
+            push(vm, result);
+
+            frame = &vm->frames[vm->frameCount - 1];
+            ip = frame->ip;
+            if (targetContext && targetContext->result) {
+                ObjFuture *targetFuture = targetContext->result;
+                if (targetFuture->pending && targetFuture->consumed) {
+                    targetFuture->pending = false;
+                    targetFuture->result =
+                        newResultError(vm, AS_CSTRING(result));
+                } else {
+                    RUNTIME_ERROR(AS_CSTRING(result));
+                    return INTERPRET_RUNTIME_ERROR;
+                }
+                return INTERPRET_OK;
+            } else {
+                RUNTIME_ERROR(AS_CSTRING(result));
+                return INTERPRET_RUNTIME_ERROR;
+            }
+
+            DISPATCH();
+        }
         CASE_CODE(CLASS) : {
             ClassType type = READ_BYTE();
             createClass(vm, READ_STRING(), NULL, type);
@@ -2775,6 +2821,23 @@ static DictuInterpretResult runEventLoop(DictuVM *vm) {
                         if (vv == t->waitFor && vv->isAwait)
                             pop(vm);
                     }
+                    Value result = t->waitFor->result;
+
+                    if (IS_RESULT(result) && AS_RESULT(result)->status == ERR) {
+                        if (t->waitFor->isAwait && t->asyncContext->result &&
+                            t->asyncContext->result->pending &&
+                            t->asyncContext->result->consumed) {
+
+                            t->asyncContext->result->result = result;
+                            t->asyncContext->result->pending = false;
+                            goto next;
+                        } else if (t->waitFor->isAwait) {
+                            ObjResult *res = AS_RESULT(result);
+                            char *str = AS_CSTRING(res->value);
+                            runtimeError(vm, str);
+                            return INTERPRET_RUNTIME_ERROR;
+                        }
+                    }
                     push(vm, t->waitFor->result);
                 }
                 // for(Value* ptr = vm->stack; ptr < vm->stackTop; ptr++){
@@ -2796,6 +2859,7 @@ static DictuInterpretResult runEventLoop(DictuVM *vm) {
 
                 if (result != INTERPRET_OK)
                     return result;
+            next:
                 t->asyncContext->refs--;
                 vm->asyncContextInScope = NULL;
                 vm->stack = localStack;

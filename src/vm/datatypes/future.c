@@ -39,7 +39,6 @@ static Value then(DictuVM *vm, int argCount, Value *args) {
     if (argCount != 1)
         return EMPTY_VAL;
     ObjFuture *future = AS_FUTURE(args[0]);
-
     AsyncContext *context = copyVmState(vm);
     context->breakFrame = context->frameCount;
     CallFrame *frame = &context->frames[context->frameCount++];
@@ -56,6 +55,9 @@ static Value then(DictuVM *vm, int argCount, Value *args) {
       context->ref = vm->asyncContextInScope;
       vm->asyncContextInScope->refs++;
     }
+    context->stack[context->stackSize++] = args[1];
+    context->stack[context->stackSize++] = args[0];
+    future->consumed = true;
     frame->slots = context->stack+(context->stackSize -1);
     Task* t = createTask(vm, true);
     t->asyncContext = context;

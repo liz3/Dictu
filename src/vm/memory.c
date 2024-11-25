@@ -323,6 +323,7 @@ void collectGarbage(DictuVM *vm) {
         grayValue(vm, *slot);
     }
 
+    
     for (int i = 0; i < vm->asyncContextCount; i++) {
         AsyncContext *ctx = vm->asyncContexts[i];
         if (ctx->refs > 0) {
