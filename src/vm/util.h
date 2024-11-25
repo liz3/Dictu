@@ -19,4 +19,8 @@ ObjString *dirname(DictuVM *vm, char *path, int len);
 
 bool resolvePath(char *directory, char *path, char *ret);
 
+uint64_t getTimeMs();
+
+int msleep(uint32_t msec);
+
 #endif //dictu_util_h

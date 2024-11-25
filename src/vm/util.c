@@ -1,9 +1,13 @@
+#include "util.h"
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
+#include <time.h>
 
-#include "vm.h"
 #include "memory.h"
+#include "vm.h"
 
 char *readFile(DictuVM *vm, const char *path) {
     FILE *file = fopen(path, "rb");
@@ -42,21 +46,21 @@ ObjString *dirname(DictuVM *vm, char *path, int len) {
 
     /* trailing slashes */
     while (sep != path) {
-        if (0 == IS_DIR_SEPARATOR (*sep))
+        if (0 == IS_DIR_SEPARATOR(*sep))
             break;
         sep--;
     }
 
     /* first found */
     while (sep != path) {
-        if (IS_DIR_SEPARATOR (*sep))
+        if (IS_DIR_SEPARATOR(*sep))
             break;
         sep--;
     }
 
     /* trim again */
     while (sep != path) {
-        if (0 == IS_DIR_SEPARATOR (*sep))
+        if (0 == IS_DIR_SEPARATOR(*sep))
             break;
         sep--;
     }
@@ -73,7 +77,7 @@ ObjString *dirname(DictuVM *vm, char *path, int len) {
 bool resolvePath(char *directory, char *path, char *ret) {
     char buf[PATH_MAX];
     if (*path == DIR_SEPARATOR)
-        snprintf (buf, PATH_MAX, "%s", path);
+        snprintf(buf, PATH_MAX, "%s", path);
     else
         snprintf(buf, PATH_MAX, "%s%c%s", directory, DIR_SEPARATOR, path);
 
@@ -109,7 +113,8 @@ ObjString *getDirectory(DictuVM *vm, char *source) {
     return dirname(vm, res, strlen(res));
 }
 
-void defineNative(DictuVM *vm, Table *table, const char *name, NativeFn function) {
+void defineNative(DictuVM *vm, Table *table, const char *name,
+                  NativeFn function) {
     ObjNative *native = newNative(vm, function);
     push(vm, OBJ_VAL(native));
     ObjString *methodName = copyString(vm, name, strlen(name));
@@ -119,7 +124,8 @@ void defineNative(DictuVM *vm, Table *table, const char *name, NativeFn function
     pop(vm);
 }
 
-void defineNativeProperty(DictuVM *vm, Table *table, const char *name, Value value) {
+void defineNativeProperty(DictuVM *vm, Table *table, const char *name,
+                          Value value) {
     push(vm, value);
     ObjString *propertyName = copyString(vm, name, strlen(name));
     push(vm, OBJ_VAL(propertyName));
@@ -130,7 +136,7 @@ void defineNativeProperty(DictuVM *vm, Table *table, const char *name, Value val
 
 bool isValidKey(Value value) {
     if (IS_NIL(value) || IS_BOOL(value) || IS_NUMBER(value) ||
-    IS_STRING(value)) {
+        IS_STRING(value)) {
         return true;
     }
 
@@ -144,4 +150,22 @@ Value boolNative(DictuVM *vm, int argCount, Value *args) {
     }
 
     return BOOL_VAL(!isFalsey(args[0]));
+}
+uint64_t getTimeMs() {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+
+    unsigned long long millisecondsSinceEpoch =
+        (unsigned long long)(tv.tv_sec) * 1000 +
+        (unsigned long long)(tv.tv_usec) / 1000;
+    return millisecondsSinceEpoch;
+}
+int msleep(uint32_t msec){
+    struct timespec ts;
+    int res;
+
+    ts.tv_sec = msec / 1000;
+    ts.tv_nsec = (msec % 1000) * 1000000;
+    res = nanosleep(&ts, &ts);
+    return res;
 }

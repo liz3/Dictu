@@ -15,6 +15,13 @@ typedef struct {
     Value *slots;
 } CallFrame;
 
+typedef struct {
+    int interval;
+    uint64_t next;
+    bool repeating;
+    bool cancelled;
+} TaskTimer;
+
 typedef struct asyncContext {
      CallFrame *frames;
      int frameCount;
@@ -26,6 +33,7 @@ typedef struct asyncContext {
      ObjUpvalue *openUpvalues;
      struct asyncContext* ref;
      int refs;
+     TaskTimer* timer;
 } AsyncContext;
 
 

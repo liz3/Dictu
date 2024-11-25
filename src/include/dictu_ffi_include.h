@@ -11,7 +11,7 @@ extern "C" {
 
 // This is used ti determine if we can safely load the function pointers without
 // UB.
-#define FFI_MOD_API_VERSION 3
+#define FFI_MOD_API_VERSION 4
 
 #define UNUSED(__x__) (void)__x__
 
@@ -79,6 +79,7 @@ typedef struct sObjSet ObjSet;
 typedef struct sObjFile ObjFile;
 typedef struct sObjAbstract ObjAbstract;
 typedef struct sObjResult ObjResult;
+typedef struct sObjFuture ObjFuture;
 
 // A mask that selects the sign bit.
 #define SIGN_BIT ((uint64_t)1 << 63)
@@ -171,7 +172,8 @@ typedef enum {
     OBJ_FILE,
     OBJ_ABSTRACT,
     OBJ_RESULT,
-    OBJ_UPVALUE
+    OBJ_UPVALUE,
+    OBJ_FUTURE
 } ObjType;
 
 #define OBJ_TYPE(value) (AS_OBJ(value)->type)
@@ -192,6 +194,7 @@ typedef enum {
 #define AS_FILE(value) ((ObjFile *)AS_OBJ(value))
 #define AS_ABSTRACT(value) ((ObjAbstract *)AS_OBJ(value))
 #define AS_RESULT(value) ((ObjResult *)AS_OBJ(value))
+#define AS_FUTURE(value) ((ObjFuture *)AS_OBJ(value))
 
 #define IS_MODULE(value) isObjType(value, OBJ_MODULE)
 #define IS_BOUND_METHOD(value) isObjType(value, OBJ_BOUND_METHOD)
@@ -212,6 +215,7 @@ typedef enum {
 #define IS_FILE(value) isObjType(value, OBJ_FILE)
 #define IS_ABSTRACT(value) isObjType(value, OBJ_ABSTRACT)
 #define IS_RESULT(value) isObjType(value, OBJ_RESULT)
+#define IS_FUTURE(value) isObjType(value, OBJ_FUTURE)
 
 
 
@@ -303,12 +307,45 @@ typedef struct {
     Value *slots;
 } CallFrame;
 
+typedef struct {
+    int interval;
+    uint64_t next;
+    bool repeating;
+    bool cancelled;
+} TaskTimer;
+
+typedef struct asyncContext {
+     CallFrame *frames;
+     int frameCount;
+     int frameCapacity;
+     ObjFuture* result;
+     int breakFrame;
+     Value stack[STACK_MAX];
+     int stackSize;
+     ObjUpvalue *openUpvalues;
+     struct asyncContext* ref;
+     int refs;
+     TaskTimer* timer;
+} AsyncContext;
+
+
+typedef struct {
+    CallFrame *frame;
+    ObjFuture* waitFor;
+    AsyncContext* asyncContext;
+} Task;
+
 struct _vm {
-    void* _compilerStub;
-    Value stack[STACK_MAX];
+    void *compilerStub;
+    Value* stack;
     Value *stackTop;
     bool repl;
     CallFrame *frames;
+    AsyncContext* asyncContextInScope;
+    AsyncContext** asyncContexts;
+    Task** tasks;
+    int taskCount;
+    int asyncContextCount;
     int frameCount;
     int frameCapacity;
     ObjModule *lastModule;
@@ -324,6 +361,7 @@ struct _vm {
     Table dictMethods;
     Table setMethods;
     Table fileMethods;
+    Table futureMethods;
     Table classMethods;
     Table instanceMethods;
     Table resultMethods;
@@ -402,6 +440,15 @@ struct sObjFile {
     FILE *file;
     char *path;
     char *openType;
+};
+
+struct sObjFuture {
+    Obj obj;
+    bool pending;
+    bool isAwait;
+    bool consumed;
+    bool controlled;
+    Value result;
 };
 
 typedef void (*AbstractFreeFn)(DictuVM *vm, ObjAbstract *abstract);
@@ -494,6 +541,8 @@ typedef ObjDict *newDict_t(DictuVM *vm);
 typedef ObjSet *newSet_t(DictuVM *vm);
 
 typedef ObjFile *newFile_t(DictuVM *vm);
+
+typedef ObjFuture *newFuture_t(DictuVM *vm);
 
 typedef ObjAbstract *newAbstract_t(DictuVM *vm, AbstractFreeFn func,
                                    AbstractTypeFn type);
@@ -622,6 +671,8 @@ defineNativeProperty_t *defineNativeProperty = NULL;
 
 callFunction_t *callFunction = NULL;
 
+newFuture_t *newFuture = NULL;
+
 // This needs to be implemented by the user and register all functions
 int dictu_ffi_init(DictuVM *vm, Table *method_table);
 
@@ -672,6 +723,7 @@ int dictu_internal_ffi_init(void **function_ptrs, DictuVM *vm,
     defineNativeProperty = (defineNativeProperty_t *)function_ptrs[count++];
     reallocate = (reallocate_t *)function_ptrs[count++];
     callFunction = (callFunction_t *)function_ptrs[count++];
+    newFuture = (newFuture_t *)function_ptrs[count++];
     int initResult = dictu_ffi_init(vm, methodTable);
     if (initResult > 0)
         return 3 + initResult;

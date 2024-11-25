@@ -150,16 +150,13 @@ void releaseAsyncContext(DictuVM *vm, AsyncContext *ctx) {
         vm->asyncContextCount--;
     }
 }
-
-Task *createTask(DictuVM *vm, bool prepend) {
+void pushTask(DictuVM *vm, Task *ctx, bool prepend) {
     if (vm->taskCount == 0) {
         vm->tasks = ALLOCATE(vm, Task *, 1);
     } else {
         vm->tasks =
             GROW_ARRAY(vm, vm->tasks, Task *, vm->taskCount, vm->taskCount + 1);
     }
-    Task *ctx = ALLOCATE(vm, Task, 1);
-    memset(ctx, 0, sizeof(Task));
     if (prepend) {
         for (int i = vm->taskCount - 1; i >= 0; i--) {
             vm->tasks[i + 1] = vm->tasks[i];
@@ -169,6 +166,11 @@ Task *createTask(DictuVM *vm, bool prepend) {
     } else {
         vm->tasks[vm->taskCount++] = ctx;
     }
+}
+Task *createTask(DictuVM *vm, bool prepend) {
+    Task *ctx = ALLOCATE(vm, Task, 1);
+    memset(ctx, 0, sizeof(Task));
+    pushTask(vm, ctx, prepend);
     return ctx;
 }
 void releaseTask(DictuVM *vm, Task *ctx) {
@@ -2567,6 +2569,7 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame,
             }
             DISPATCH();
         }
+
         CASE_CODE(THROW) : {
             Value result = pop(vm);
             if (!IS_STRING(result)) {
@@ -2607,6 +2610,7 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame,
 
             DISPATCH();
         }
+
         CASE_CODE(CLASS) : {
             ClassType type = READ_BYTE();
             createClass(vm, READ_STRING(), NULL, type);
@@ -2780,13 +2784,27 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame,
 // }
 
 static DictuInterpretResult runEventLoop(DictuVM *vm) {
+    int fastCount = 0;
     while (true) {
         Task *t = popTask(vm, true);
         if (t == NULL)
             break;
+        uint64_t now = getTimeMs();
+        if (t->asyncContext && t->asyncContext->timer) {
+            if (!t->asyncContext->timer->cancelled &&
+                now < t->asyncContext->timer->next) {
+                pushTask(vm, t, true);
+                if (fastCount >= vm->taskCount) {
+                    msleep(1);
+                    fastCount = 0;
+                } else {
+                    fastCount++;
+                }
+                continue;
+            }
+        }
 
         if (t->frame) {
-            printf("%d\n", vm->frameCount);
             CallFrame current = vm->frames[vm->frameCount - 1];
             vm->frames[vm->frameCount - 1] = *t->frame;
             DictuInterpretResult result = runWithBreakFrame(vm, -1, NULL);
@@ -2814,6 +2832,8 @@ static DictuInterpretResult runEventLoop(DictuVM *vm) {
                 vm->frameCount = t->asyncContext->frameCount;
                 vm->asyncContextInScope = t->asyncContext;
                 vm->openUpvalues = t->asyncContext->openUpvalues;
+                if (t->asyncContext->timer->cancelled)
+                    goto next;
                 if (t->waitFor && !t->waitFor->pending) {
                     Value v = peek(vm, 0);
                     if (IS_FUTURE(v)) {
@@ -2840,20 +2860,16 @@ static DictuInterpretResult runEventLoop(DictuVM *vm) {
                     }
                     push(vm, t->waitFor->result);
                 }
-                // for(Value* ptr = vm->stack; ptr < vm->stackTop; ptr++){
-                //                if(ptr == NULL)
-                //                 break;
-                //             char* vv = valueToString(*ptr);
-                //     printf("%p: %s\n", ptr, vv);
-                //     free(vv);
-                // }
-                //           for(Value* ptr =
-                //           vm->frames[vm->frameCount-1].slots; ptr <
-                //           vm->stackTop; ptr++){
-                //             if(ptr == NULL)
-                //                 break;
-                //     printf("SLOT %p: %s\n", ptr, valueToString(*ptr));
-                // }
+                if (t->asyncContext->timer &&
+                    t->asyncContext->timer->repeating) {
+                    t->asyncContext->timer->next =
+                        now + t->asyncContext->timer->interval;
+                    AsyncContext *next = copyVmState(vm);
+                    next->breakFrame = next->frameCount-1;
+                    next->timer = t->asyncContext->timer;
+                    Task *nextTask = createTask(vm, false);
+                    nextTask->asyncContext = next;
+                }
                 DictuInterpretResult result = runWithBreakFrame(
                     vm, t->asyncContext->breakFrame, t->asyncContext);
 
@@ -2868,12 +2884,26 @@ static DictuInterpretResult runEventLoop(DictuVM *vm) {
                 vm->frameCount = frameCount;
                 vm->frameCapacity = frameCapacity;
                 vm->openUpvalues = upValues;
-
                 releaseAsyncContext(vm, t->asyncContext);
             }
         }
         collectGarbage(vm);
         FREE(vm, Task, t);
+
+        // in case we are waiting for a timer, do not overload the cpu
+        // by waiting a ms if we are rushing through tasks faster then 3 ms/task
+        // for all tasks
+        uint64_t last = getTimeMs();
+        if (last - now < 3) {
+            if (fastCount >= vm->taskCount) {
+                msleep(1);
+                fastCount = 0;
+            } else {
+                fastCount++;
+            }
+        } else {
+            fastCount = 0;
+        }
     }
 
     return INTERPRET_OK;

@@ -1,15 +1,135 @@
 #include "future.h"
 
-static Value createNewFuture(DictuVM *vm, int argCount, Value *args) {
-  UNUSED(args);
-  UNUSED(argCount);
-  ObjFuture* future = newFuture(vm);
-  future->consumed = false;
-  future->controlled = false;
-  future->isAwait = false;
-  return OBJ_VAL(future);
+typedef struct {
+    TaskTimer *timer;
+} TaskTimerAbstract;
+
+#define AS_TASK_TIMER(v) ((TaskTimerAbstract *)AS_ABSTRACT(v)->data)
+
+void freeTaskTimerAbstract(DictuVM *vm, ObjAbstract *abstract) {
+    TaskTimerAbstract *timer = (TaskTimerAbstract *)abstract->data;
+    FREE(vm, TaskTimer, timer->timer);
+    FREE(vm, TaskTimerAbstract, abstract->data);
 }
 
+char *taskTimerAbstractToString(ObjAbstract *abstract) {
+    UNUSED(abstract);
+
+    char *bufferString = malloc(sizeof(char) * 12);
+    snprintf(bufferString, 12, "<TaskTimer>");
+    return bufferString;
+}
+
+void grayTaskTimerAbstract(DictuVM *vm, ObjAbstract *abstract) {
+    (void)vm;
+    TaskTimerAbstract *entry = (TaskTimerAbstract *)abstract->data;
+
+    if (entry == NULL)
+        return;
+}
+
+static Value createNewFuture(DictuVM *vm, int argCount, Value *args) {
+    UNUSED(args);
+    UNUSED(argCount);
+    ObjFuture *future = newFuture(vm);
+    future->consumed = false;
+    future->controlled = false;
+    future->isAwait = false;
+    return OBJ_VAL(future);
+}
+
+static Value cancelTimer(DictuVM *vm, int argCount, Value *args) {
+    if (argCount > 0) {
+        runtimeError(vm, "cancel() takes no arguments.");
+        return EMPTY_VAL;
+    }
+    TaskTimerAbstract *tta = AS_TASK_TIMER(args[0]);
+    if (tta->timer->cancelled)
+        return BOOL_VAL(false);
+    tta->timer->cancelled = true;
+    return BOOL_VAL(true);
+}
+
+static Value createTimer(DictuVM *vm, int argCount, Value *args, bool timeout) {
+    if (argCount < 1 || (!IS_CLOSURE(args[0]) && IS_FUNCTION(args[0]))) {
+        if (timeout)
+            runtimeError(vm,
+                         "runLater() first argument needs to be a callable.");
+        else
+            runtimeError(
+                vm, "runInterval() first argument needs to be a callable.");
+        return EMPTY_VAL;
+    }
+    if (argCount > 1 && !IS_NUMBER(args[1])) {
+        if (timeout)
+            runtimeError(vm, "runLater() second argument needs to a number.");
+        else
+            runtimeError(vm,
+                         "runInterval() second argument needs to be a number.");
+        return EMPTY_VAL;
+    }
+    ObjClosure *closure = NULL;
+    ObjFunction *function;
+    int interval = argCount > 1 ? AS_NUMBER(args[1]) : 1;
+    if (interval < 1) {
+        if (timeout)
+            runtimeError(vm, "runLater() timeout needs to be >= 1.");
+        else
+            runtimeError(vm, "runInterval() interval value needs to be >= 1.");
+        return EMPTY_VAL;
+    }
+    if (IS_CLOSURE(args[0])) {
+        closure = AS_CLOSURE(args[0]);
+        function = closure->function;
+
+    } else {
+        function = AS_FUNCTION(args[0]);
+        push(vm, args[0]);
+        closure = newClosure(vm, function);
+        pop(vm);
+    }
+
+    ObjAbstract *abstract =
+        newAbstract(vm, freeTaskTimerAbstract, taskTimerAbstractToString);
+    push(vm, OBJ_VAL(abstract));
+    TaskTimerAbstract *tta = ALLOCATE(vm, TaskTimerAbstract, 1);
+    TaskTimer *timer = ALLOCATE(vm, TaskTimer, 1);
+    timer->cancelled = false;
+    timer->repeating = !timeout;
+    timer->interval = interval;
+    timer->next = getTimeMs() + interval;
+    tta->timer = timer;
+    AsyncContext *context = copyVmState(vm);
+    context->breakFrame = context->frameCount;
+    CallFrame *frame = &context->frames[context->frameCount++];
+
+    frame->closure = closure;
+    frame->ip = function->chunk.code;
+
+    if (vm->asyncContextInScope) {
+        context->ref = vm->asyncContextInScope;
+        vm->asyncContextInScope->refs++;
+    }
+    context->stack[context->stackSize++] = args[1];
+    context->timer = timer;
+    frame->slots = context->stack + (context->stackSize - 1);
+    Task *t = createTask(vm, true);
+    t->asyncContext = context;
+    defineNative(vm, &abstract->values, "cancel", cancelTimer);
+    abstract->data = tta;
+    abstract->grayFunc = grayTaskTimerAbstract;
+    pop(vm);
+
+    return OBJ_VAL(abstract);
+}
+
+static Value createInterval(DictuVM *vm, int argCount, Value *args) {
+    return createTimer(vm, argCount, args, false);
+}
+
+static Value runLater(DictuVM *vm, int argCount, Value *args) {
+    return createTimer(vm, argCount, args, true);
+}
 
 Value createFutureModule(DictuVM *vm) {
     ObjString *name = copyString(vm, "Future", 6);
@@ -17,6 +137,8 @@ Value createFutureModule(DictuVM *vm) {
     ObjModule *module = newModule(vm, name);
     push(vm, OBJ_VAL(module));
     defineNative(vm, &module->values, "new", createNewFuture);
+    defineNative(vm, &module->values, "runInterval", createInterval);
+    defineNative(vm, &module->values, "runLater", runLater);
 
     pop(vm);
     pop(vm);
