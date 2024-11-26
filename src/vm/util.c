@@ -5,6 +5,7 @@
 #include <string.h>
 #include <sys/time.h>
 #include <time.h>
+#include <uv.h>
 
 #include "memory.h"
 #include "vm.h"
@@ -168,4 +169,8 @@ int msleep(uint32_t msec){
     ts.tv_nsec = (msec % 1000) * 1000000;
     res = nanosleep(&ts, &ts);
     return res;
+}
+DictuVM* vmFromUvHandle(const uv_handle_t *handle) {
+    uv_loop_t* loop = uv_handle_get_loop(handle);
+    return (DictuVM*)uv_loop_get_data(loop);
 }

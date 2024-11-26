@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <uv.h>
 
 #include "../optionals/optionals.h"
 #include "chunk.h"
@@ -229,6 +230,7 @@ DictuVM *dictuInitVM(bool repl, int argc, char **argv) {
     vm->asyncContextCount = 0;
     vm->tasks = NULL;
     vm->taskCount = 0;
+    vm->timerAmount = 0;
     vm->argc = argc;
     vm->argv = argv;
     initTable(&vm->modules);
@@ -2783,130 +2785,153 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame,
 //     return runWithBreakFrame(vm, -1, NULL);
 // }
 
-static DictuInterpretResult runEventLoop(DictuVM *vm) {
-    int fastCount = 0;
-    while (true) {
-        Task *t = popTask(vm, true);
-        if (t == NULL)
-            break;
-        uint64_t now = getTimeMs();
-        if (t->asyncContext && t->asyncContext->timer) {
-            if (!t->asyncContext->timer->cancelled &&
-                now < t->asyncContext->timer->next) {
-                pushTask(vm, t, true);
-                if (fastCount >= vm->taskCount) {
-                    msleep(1);
-                    fastCount = 0;
-                } else {
-                    fastCount++;
+DictuInterpretResult run_task(DictuVM *vm, Task *t) {
+    if (t->frame) {
+        CallFrame current = vm->frames[vm->frameCount - 1];
+        vm->frames[vm->frameCount - 1] = *t->frame;
+        DictuInterpretResult result = runWithBreakFrame(vm, -1, NULL);
+        if (result != INTERPRET_OK)
+            return result;
+        if (vm->frameCount > 0)
+            vm->frames[vm->frameCount - 1] = current;
+    } else if (t->asyncContext) {
+        if (t->waitFor && t->waitFor->pending) {
+            Task *newTask = createTask(vm, true);
+            newTask->waitFor = t->waitFor;
+            newTask->asyncContext = t->asyncContext;
+        } else {
+            // execute
+            Value *localStack = vm->stack;
+            int stackTopCurrent = vm->stackTop - vm->stack;
+            CallFrame *frames = vm->frames;
+            ObjUpvalue *upValues = vm->openUpvalues;
+            int frameCount = vm->frameCount;
+            int frameCapacity = vm->frameCapacity;
+            vm->stack = t->asyncContext->stack;
+            vm->stackTop = vm->stack + t->asyncContext->stackSize;
+            vm->frames = t->asyncContext->frames;
+            vm->frameCapacity = t->asyncContext->frameCapacity;
+            vm->frameCount = t->asyncContext->frameCount;
+            vm->asyncContextInScope = t->asyncContext;
+            vm->openUpvalues = t->asyncContext->openUpvalues;
+            if (t->waitFor && !t->waitFor->pending) {
+                Value v = peek(vm, 0);
+                if (IS_FUTURE(v)) {
+                    ObjFuture *vv = AS_FUTURE(v);
+                    if (vv == t->waitFor && vv->isAwait)
+                        pop(vm);
                 }
-                continue;
-            }
-        }
+                Value result = t->waitFor->result;
 
-        if (t->frame) {
-            CallFrame current = vm->frames[vm->frameCount - 1];
-            vm->frames[vm->frameCount - 1] = *t->frame;
-            DictuInterpretResult result = runWithBreakFrame(vm, -1, NULL);
+                if (IS_RESULT(result) && AS_RESULT(result)->status == ERR) {
+                    if (t->waitFor->isAwait && t->asyncContext->result &&
+                        t->asyncContext->result->pending &&
+                        t->asyncContext->result->consumed) {
+
+                        t->asyncContext->result->result = result;
+                        t->asyncContext->result->pending = false;
+                        goto next;
+                    } else if (t->waitFor->isAwait) {
+                        ObjResult *res = AS_RESULT(result);
+                        char *str = AS_CSTRING(res->value);
+                        runtimeError(vm, str);
+                        return INTERPRET_RUNTIME_ERROR;
+                    }
+                }
+                push(vm, t->waitFor->result);
+            }
+            DictuInterpretResult result = runWithBreakFrame(
+                vm, t->asyncContext->breakFrame, t->asyncContext);
+
             if (result != INTERPRET_OK)
                 return result;
-            if (vm->frameCount > 0)
-                vm->frames[vm->frameCount - 1] = current;
-        } else if (t->asyncContext) {
-            if (t->waitFor && t->waitFor->pending) {
-                Task *newTask = createTask(vm, true);
-                newTask->waitFor = t->waitFor;
-                newTask->asyncContext = t->asyncContext;
-            } else {
-                // execute
-                Value *localStack = vm->stack;
-                int stackTopCurrent = vm->stackTop - vm->stack;
-                CallFrame *frames = vm->frames;
-                ObjUpvalue *upValues = vm->openUpvalues;
-                int frameCount = vm->frameCount;
-                int frameCapacity = vm->frameCapacity;
-                vm->stack = t->asyncContext->stack;
-                vm->stackTop = vm->stack + t->asyncContext->stackSize;
-                vm->frames = t->asyncContext->frames;
-                vm->frameCapacity = t->asyncContext->frameCapacity;
-                vm->frameCount = t->asyncContext->frameCount;
-                vm->asyncContextInScope = t->asyncContext;
-                vm->openUpvalues = t->asyncContext->openUpvalues;
-                if (t->asyncContext->timer->cancelled)
-                    goto next;
-                if (t->waitFor && !t->waitFor->pending) {
-                    Value v = peek(vm, 0);
-                    if (IS_FUTURE(v)) {
-                        ObjFuture *vv = AS_FUTURE(v);
-                        if (vv == t->waitFor && vv->isAwait)
-                            pop(vm);
-                    }
-                    Value result = t->waitFor->result;
-
-                    if (IS_RESULT(result) && AS_RESULT(result)->status == ERR) {
-                        if (t->waitFor->isAwait && t->asyncContext->result &&
-                            t->asyncContext->result->pending &&
-                            t->asyncContext->result->consumed) {
-
-                            t->asyncContext->result->result = result;
-                            t->asyncContext->result->pending = false;
-                            goto next;
-                        } else if (t->waitFor->isAwait) {
-                            ObjResult *res = AS_RESULT(result);
-                            char *str = AS_CSTRING(res->value);
-                            runtimeError(vm, str);
-                            return INTERPRET_RUNTIME_ERROR;
-                        }
-                    }
-                    push(vm, t->waitFor->result);
-                }
-                if (t->asyncContext->timer &&
-                    t->asyncContext->timer->repeating) {
-                    t->asyncContext->timer->next =
-                        now + t->asyncContext->timer->interval;
-                    AsyncContext *next = copyVmState(vm);
-                    next->breakFrame = next->frameCount-1;
-                    next->timer = t->asyncContext->timer;
-                    Task *nextTask = createTask(vm, false);
-                    nextTask->asyncContext = next;
-                }
-                DictuInterpretResult result = runWithBreakFrame(
-                    vm, t->asyncContext->breakFrame, t->asyncContext);
-
-                if (result != INTERPRET_OK)
-                    return result;
-            next:
-                t->asyncContext->refs--;
-                vm->asyncContextInScope = NULL;
-                vm->stack = localStack;
-                vm->stackTop = vm->stack + stackTopCurrent;
-                vm->frames = frames;
-                vm->frameCount = frameCount;
-                vm->frameCapacity = frameCapacity;
-                vm->openUpvalues = upValues;
-                releaseAsyncContext(vm, t->asyncContext);
-            }
-        }
-        collectGarbage(vm);
-        FREE(vm, Task, t);
-
-        // in case we are waiting for a timer, do not overload the cpu
-        // by waiting a ms if we are rushing through tasks faster then 3 ms/task
-        // for all tasks
-        uint64_t last = getTimeMs();
-        if (last - now < 3) {
-            if (fastCount >= vm->taskCount) {
-                msleep(1);
-                fastCount = 0;
-            } else {
-                fastCount++;
-            }
-        } else {
-            fastCount = 0;
+        next:
+            t->asyncContext->refs--;
+            vm->asyncContextInScope = NULL;
+            vm->stack = localStack;
+            vm->stackTop = vm->stack + stackTopCurrent;
+            vm->frames = frames;
+            vm->frameCount = frameCount;
+            vm->frameCapacity = frameCapacity;
+            vm->openUpvalues = upValues;
+            releaseAsyncContext(vm, t->asyncContext);
         }
     }
-
     return INTERPRET_OK;
+}
+
+void el_task_cb(uv_idle_t *handle) {
+    DictuVM *vm = vmFromUvHandle((uv_handle_t*)handle);
+    Task *t = popTask(vm, true);
+    if(!t) {
+        if(vm->timerAmount == 0 && vm->taskCount == 0) {
+            uv_idle_stop(handle);
+        }
+        if(vm->taskCount == 0)
+            msleep(1);
+        return;
+    }
+    DictuInterpretResult res = run_task(vm, t);
+    FREE(vm, Task, t);
+    if(res != INTERPRET_OK){
+        uv_loop_t* loop = uv_handle_get_loop((uv_handle_t*)handle);
+        uv_stop(loop);
+    }
+}
+void el_timer_cb(uv_timer_t *handle) {
+    TaskTimer* timer = handle->data;
+    DictuVM* vm = vmFromUvHandle((uv_handle_t*)handle);
+    AsyncContext* ctx = timer->context;
+    Value *localStack = vm->stack;
+    int stackTopCurrent = vm->stackTop - vm->stack;
+    CallFrame *frames = vm->frames;
+    ObjUpvalue *upValues = vm->openUpvalues;
+    int frameCount = vm->frameCount;
+    int frameCapacity = vm->frameCapacity;
+    vm->stack = ctx->stack;
+    vm->stackTop = vm->stack + ctx->stackSize;
+    vm->frames = ctx->frames;
+    vm->frameCapacity = ctx->frameCapacity;
+    vm->frameCount = ctx->frameCount;
+    vm->asyncContextInScope = ctx;
+    vm->openUpvalues = ctx->openUpvalues;
+    CallFrame saveFrame = vm->frames[vm->frameCount-1];
+    DictuInterpretResult result = runWithBreakFrame(
+        vm, ctx->breakFrame, ctx);
+
+    if (result != INTERPRET_OK) {
+        uv_loop_t* loop = uv_handle_get_loop((uv_handle_t*)handle);
+        uv_stop(loop);
+        return;
+    }
+  
+    vm->asyncContextInScope = NULL;
+    vm->stack = localStack;
+    vm->stackTop = vm->stack + stackTopCurrent;
+    vm->frames = frames;
+    vm->frameCount = frameCount;
+    vm->frameCapacity = frameCapacity;
+    vm->openUpvalues = upValues;
+    timer->runCount++;
+    if(!timer->timeout) {
+        ctx->frames[ctx->frameCount-1] = saveFrame;
+        return;
+    }
+    ctx->refs--;
+    vm->timerAmount--;
+}
+
+static DictuInterpretResult runEventLoop(DictuVM *vm) {
+    uv_loop_t* loop = uv_default_loop();
+    uv_loop_set_data(loop, vm);
+    vm->uv_loop = loop;
+    // Task runner
+    uv_idle_t t;
+    uv_idle_init(loop, &t);
+    uv_idle_start(&t, el_task_cb);
+    int result = uv_run(loop, UV_RUN_DEFAULT);
+    uv_close((uv_handle_t*)&t, NULL);
+    return result ? INTERPRET_RUNTIME_ERROR : INTERPRET_OK;
 }
 
 DictuInterpretResult dictuInterpret(DictuVM *vm, char *moduleName,

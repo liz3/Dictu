@@ -23,4 +23,6 @@ uint64_t getTimeMs();
 
 int msleep(uint32_t msec);
 
+DictuVM* vmFromUvHandle(const uv_handle_t *handle);
+
 #endif //dictu_util_h

@@ -2,12 +2,25 @@
 
 typedef struct {
     TaskTimer *timer;
+    bool cancelled;
 } TaskTimerAbstract;
 
 #define AS_TASK_TIMER(v) ((TaskTimerAbstract *)AS_ABSTRACT(v)->data)
 
+void release_uv_timer(uv_handle_t *handle) {
+    FREE(vmFromUvHandle((uv_handle_t *)handle), uv_timer_t, handle);
+}
+
 void freeTaskTimerAbstract(DictuVM *vm, ObjAbstract *abstract) {
     TaskTimerAbstract *timer = (TaskTimerAbstract *)abstract->data;
+    if (timer->timer->handle) {
+        uv_close((uv_handle_t *)timer->timer->handle, release_uv_timer);
+        timer->timer->handle = NULL;
+    }
+    if (timer->timer->context) {
+        releaseAsyncContext(vm, timer->timer->context);
+        timer->timer->context = NULL;
+    }
     FREE(vm, TaskTimer, timer->timer);
     FREE(vm, TaskTimerAbstract, abstract->data);
 }
@@ -44,9 +57,19 @@ static Value cancelTimer(DictuVM *vm, int argCount, Value *args) {
         return EMPTY_VAL;
     }
     TaskTimerAbstract *tta = AS_TASK_TIMER(args[0]);
-    if (tta->timer->cancelled)
+    if (tta->cancelled)
         return BOOL_VAL(false);
-    tta->timer->cancelled = true;
+    uv_timer_stop(tta->timer->handle);
+    if (!tta->timer->timeout || tta->timer->runCount == 0) {
+        if(!tta->timer->timeout)
+           tta->timer->context->refs--;
+        vm->timerAmount--;
+        if (tta->timer->handle) {
+            uv_close((uv_handle_t *)tta->timer->handle,
+                     release_uv_timer);
+            tta->timer->handle = NULL;
+        }
+    }
     return BOOL_VAL(true);
 }
 
@@ -93,13 +116,16 @@ static Value createTimer(DictuVM *vm, int argCount, Value *args, bool timeout) {
         newAbstract(vm, freeTaskTimerAbstract, taskTimerAbstractToString);
     push(vm, OBJ_VAL(abstract));
     TaskTimerAbstract *tta = ALLOCATE(vm, TaskTimerAbstract, 1);
+    tta->cancelled = false;
     TaskTimer *timer = ALLOCATE(vm, TaskTimer, 1);
-    timer->cancelled = false;
-    timer->repeating = !timeout;
-    timer->interval = interval;
-    timer->next = getTimeMs() + interval;
+    uv_timer_t *handle = ALLOCATE(vm, uv_timer_t, 1);
+    uv_timer_init(vm->uv_loop, handle);
     tta->timer = timer;
     AsyncContext *context = copyVmState(vm);
+    timer->context = context;
+    timer->timeout = timeout;
+    timer->runCount = 0;
+    vm->timerAmount++;
     context->breakFrame = context->frameCount;
     CallFrame *frame = &context->frames[context->frameCount++];
 
@@ -111,10 +137,11 @@ static Value createTimer(DictuVM *vm, int argCount, Value *args, bool timeout) {
         vm->asyncContextInScope->refs++;
     }
     context->stack[context->stackSize++] = args[1];
-    context->timer = timer;
+    timer->handle = handle;
     frame->slots = context->stack + (context->stackSize - 1);
-    Task *t = createTask(vm, true);
-    t->asyncContext = context;
+    handle->data = timer;
+    uv_timer_start(handle, el_timer_cb, interval, timeout ? 0 : interval);
+
     defineNative(vm, &abstract->values, "cancel", cancelTimer);
     abstract->data = tta;
     abstract->grayFunc = grayTaskTimerAbstract;

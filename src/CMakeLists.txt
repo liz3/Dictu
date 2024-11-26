@@ -46,7 +46,7 @@ else()
     list(APPEND libraries ${SQLITE_LIB})
     add_compile_definitions(INCLUDE_SQLITE_LIB)
 endif()
-
+list(APPEND libraries uv)
 if(WIN32)
     # ws2_32 is required for winsock2.h to work correctly
     list(APPEND libraries ws2_32 bcrypt)
@@ -74,6 +74,8 @@ if(CMAKE_BUILD_TYPE MATCHES Debug)
 endif()
 
 add_library(objlib OBJECT ${sources} ${headers})
+target_include_directories(objlib PRIVATE ${CMAKE_SOURCE_DIR}/third-party/libuv/include)
+
 
 # shared libraries need PIC
 set_property(TARGET objlib PROPERTY POSITION_INDEPENDENT_CODE 1)
