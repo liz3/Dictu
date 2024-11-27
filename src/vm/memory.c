@@ -4,6 +4,7 @@
 #include "compiler.h"
 #include "memory.h"
 #include "object.h"
+#include "value.h"
 #include "vm.h"
 
 #ifdef DEBUG_TRACE_GC
@@ -282,6 +283,11 @@ void freeObject(DictuVM *vm, Obj *object) {
         }
 
         case OBJ_FILE: {
+            ObjFile* file = (ObjFile*) object;
+            if(file->asyncApi) {
+                FREE(vm, AsyncFile, file->asyncApi);
+                file->asyncApi = NULL;
+            }
             FREE(vm, ObjFile, object);
             break;
         }

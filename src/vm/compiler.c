@@ -2587,6 +2587,11 @@ static void withStatement(Compiler *compiler) {
     expression(compiler);
     consume(compiler, TOKEN_COMMA, "Expect comma");
     expression(compiler);
+    if(match(compiler, TOKEN_COMMA)){
+        expression(compiler);
+    } else {
+        emitByte(compiler, OP_FALSE);
+    }
     consume(compiler, TOKEN_RIGHT_PAREN, "Expect ')' after 'with'.");
 
     int fileIndex = compiler->localCount;

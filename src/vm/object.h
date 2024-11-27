@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stdio.h>
+#include <uv.h>
 
 #include "../include/dictu_include.h"
 #include "common.h"
@@ -168,11 +169,18 @@ struct sObjSet {
     SetItem *entries;
 };
 
+typedef struct {
+    bool ready;
+    ssize_t fd;
+    ObjFuture* readyFuture;
+} AsyncFile;
+
 struct sObjFile {
     Obj obj;
     FILE *file;
     char *path;
     char *openType;
+    AsyncFile* asyncApi;
 };
 
 

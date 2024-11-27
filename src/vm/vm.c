@@ -2724,8 +2724,13 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame,
         }
 
         CASE_CODE(OPEN_FILE) : {
-            Value openType = peek(vm, 0);
-            Value fileName = peek(vm, 1);
+            Value openType = peek(vm, 1);
+            Value fileName = peek(vm, 2);
+            Value useAsyncApi = peek(vm, 0);
+
+            if(!IS_BOOL(useAsyncApi)) {
+                RUNTIME_ERROR("File async option must be a bool");
+            }
 
             if (!IS_STRING(openType)) {
                 RUNTIME_ERROR("File open type must be a string");
@@ -2737,16 +2742,18 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame,
 
             ObjString *openTypeString = AS_STRING(openType);
             ObjString *fileNameString = AS_STRING(fileName);
+            bool asyncApi = AS_BOOL(useAsyncApi);
 
             ObjFile *file = newFile(vm);
-            file->file = fopen(fileNameString->chars, openTypeString->chars);
+         
             file->path = fileNameString->chars;
             file->openType = openTypeString->chars;
+            file->asyncApi = asyncApi ? ALLOCATE(vm, AsyncFile, 1) : NULL;
+            
+            openFile(vm, file);
 
-            if (file->file == NULL) {
-                RUNTIME_ERROR("Unable to open file '%s'", file->path);
-            }
 
+            pop(vm);
             pop(vm);
             pop(vm);
             push(vm, OBJ_VAL(file));
@@ -2757,7 +2764,7 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame,
             uint8_t slot = READ_BYTE();
             Value file = frame->slots[slot];
             ObjFile *fileObject = AS_FILE(file);
-            fclose(fileObject->file);
+            closeFile(vm, fileObject);
 
             DISPATCH();
         }
