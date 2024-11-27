@@ -114,11 +114,11 @@ AsyncContext *createAsyncContext(DictuVM *vm) {
     return ctx;
 }
 void releaseAsyncContext(DictuVM *vm, AsyncContext *ctx) {
-    if (ctx->refs > 0) {
+    if (ctx->refCount > 0) {
         return;
     } else {
         if (ctx->ref) {
-            ctx->ref->refs--;
+            refAsyncContext(ctx->ref, false);
         }
     }
     FREE_ARRAY(vm, CallFrame, ctx->frames, ctx->frameCapacity);
@@ -194,6 +194,10 @@ void releaseTask(DictuVM *vm, Task *ctx) {
                                  vm->taskCount - 1);
     }
     vm->taskCount--;
+}
+
+void refAsyncContext(AsyncContext *ctx, bool ref) {
+    ctx->refCount += ref ? 1 : -1;
 }
 Task *popTask(DictuVM *vm, bool back) {
     if (vm->taskCount == 0)
@@ -353,7 +357,7 @@ ObjClosure *compileModuleToClosure(DictuVM *vm, char *name, char *source) {
 AsyncContext *copyVmState(DictuVM *vm) {
     AsyncContext *context = createAsyncContext(vm);
     context->breakFrame = -1;
-    context->refs = 1;
+    context->refCount = 1;
     context->frameCount = vm->frameCount;
     context->frameCapacity = vm->frameCapacity + 1;
     context->frames = ALLOCATE(vm, CallFrame, vm->frameCapacity + 1);
@@ -383,7 +387,7 @@ AsyncContext *copyVmState(DictuVM *vm) {
     return context;
 }
 
-static bool call(DictuVM *vm, ObjClosure *closure, int argCount, bool await) {
+static bool call(DictuVM *vm, ObjClosure *closure, int argCount) {
     if (argCount < closure->function->arity) {
         if ((argCount + closure->function->isVariadic) ==
             closure->function->arity) {
@@ -437,16 +441,9 @@ static bool call(DictuVM *vm, ObjClosure *closure, int argCount, bool await) {
                                 vm->frameCapacity);
     }
 
-    if (await && !vm->frames[vm->frameCount - 1].closure->function->async) {
-        runtimeError(vm, "await call outside of async block!");
-        return false;
-    }
-
     if (closure->function->async) {
         AsyncContext *context = copyVmState(vm);
         context->result = newFuture(vm);
-        context->result->isAwait = await;
-        context->result->consumed = await;
         context->breakFrame = vm->frameCount;
         CallFrame *frame = &context->frames[context->frameCount++];
         frame->closure = closure;
@@ -468,8 +465,7 @@ static bool call(DictuVM *vm, ObjClosure *closure, int argCount, bool await) {
     return true;
 }
 
-static bool callValue(DictuVM *vm, Value callee, int argCount, bool unpack,
-                      bool await) {
+static bool callValue(DictuVM *vm, Value callee, int argCount, bool unpack) {
     if (IS_OBJ(callee)) {
         HANDLE_UNPACK
 
@@ -480,7 +476,7 @@ static bool callValue(DictuVM *vm, Value callee, int argCount, bool unpack,
             // Replace the bound method with the receiver so it's in the
             // right slot when the method is called.
             vm->stackTop[-argCount - 1] = bound->receiver;
-            return call(vm, bound->method, argCount, await);
+            return call(vm, bound->method, argCount);
         }
 
         case OBJ_CLASS: {
@@ -497,7 +493,7 @@ static bool callValue(DictuVM *vm, Value callee, int argCount, bool unpack,
             // Call the initializer, if there is one.
             Value initializer;
             if (tableGet(&klass->publicMethods, vm->initString, &initializer)) {
-                return call(vm, AS_CLOSURE(initializer), argCount, await);
+                return call(vm, AS_CLOSURE(initializer), argCount);
             } else if (argCount != 0) {
                 runtimeError(vm, "Expected 0 arguments but got %d.", argCount);
                 return false;
@@ -509,7 +505,7 @@ static bool callValue(DictuVM *vm, Value callee, int argCount, bool unpack,
         case OBJ_CLOSURE: {
             vm->stackTop[-argCount - 1] = callee;
 
-            return call(vm, AS_CLOSURE(callee), argCount, await);
+            return call(vm, AS_CLOSURE(callee), argCount);
         }
 
         case OBJ_NATIVE: {
@@ -565,7 +561,7 @@ static bool callNativeMethodExcludeSelf(DictuVM *vm, Value method,
 }
 
 static bool invokeFromClass(DictuVM *vm, ObjClass *klass, ObjString *name,
-                            int argCount, bool unpack, bool await) {
+                            int argCount, bool unpack) {
     HANDLE_UNPACK
 
     // Look for the method.
@@ -583,11 +579,11 @@ static bool invokeFromClass(DictuVM *vm, ObjClass *klass, ObjString *name,
         return false;
     }
 
-    return call(vm, AS_CLOSURE(method), argCount, await);
+    return call(vm, AS_CLOSURE(method), argCount);
 }
 
 static bool invokeInternal(DictuVM *vm, ObjString *name, int argCount,
-                           bool unpack, bool await) {
+                           bool unpack) {
     Value receiver = peek(vm, argCount);
 
     HANDLE_UNPACK
@@ -598,11 +594,11 @@ static bool invokeInternal(DictuVM *vm, ObjString *name, int argCount,
         Value value;
         // Look for the method.
         if (tableGet(&instance->klass->privateMethods, name, &value)) {
-            return call(vm, AS_CLOSURE(value), argCount, await);
+            return call(vm, AS_CLOSURE(value), argCount);
         }
 
         if (tableGet(&instance->klass->publicMethods, name, &value)) {
-            return call(vm, AS_CLOSURE(value), argCount, await);
+            return call(vm, AS_CLOSURE(value), argCount);
         }
 
         // Check for instance methods.
@@ -613,7 +609,7 @@ static bool invokeInternal(DictuVM *vm, ObjString *name, int argCount,
         // Look for a field which may shadow a method.
         if (tableGet(&instance->publicAttributes, name, &value)) {
             vm->stackTop[-argCount - 1] = value;
-            return callValue(vm, value, argCount, unpack, await);
+            return callValue(vm, value, argCount, unpack);
         }
     } else if (IS_CLASS(receiver)) {
         ObjClass *instance = AS_CLASS(receiver);
@@ -631,7 +627,7 @@ static bool invokeInternal(DictuVM *vm, ObjString *name, int argCount,
                 return false;
             }
 
-            return callValue(vm, method, argCount, unpack, await);
+            return callValue(vm, method, argCount, unpack);
         }
 
         if (tableGet(&instance->publicMethods, name, &method)) {
@@ -647,7 +643,7 @@ static bool invokeInternal(DictuVM *vm, ObjString *name, int argCount,
                 return false;
             }
 
-            return callValue(vm, method, argCount, unpack, await);
+            return callValue(vm, method, argCount, unpack);
         }
 
         if (tableGet(&vm->classMethods, name, &method)) {
@@ -659,8 +655,7 @@ static bool invokeInternal(DictuVM *vm, ObjString *name, int argCount,
     return false;
 }
 
-static bool invoke(DictuVM *vm, ObjString *name, int argCount, bool unpack,
-                   bool await) {
+static bool invoke(DictuVM *vm, ObjString *name, int argCount, bool unpack) {
     Value receiver = peek(vm, argCount);
 
     HANDLE_UNPACK
@@ -701,7 +696,7 @@ static bool invoke(DictuVM *vm, ObjString *name, int argCount, bool unpack,
                 runtimeError(vm, "Undefined attribute '%s'.", name->chars);
                 return false;
             }
-            return callValue(vm, value, argCount, unpack, await);
+            return callValue(vm, value, argCount, unpack);
         }
 
         case OBJ_CLASS: {
@@ -720,7 +715,7 @@ static bool invoke(DictuVM *vm, ObjString *name, int argCount, bool unpack,
                     return false;
                 }
 
-                return callValue(vm, method, argCount, unpack, await);
+                return callValue(vm, method, argCount, unpack);
             }
 
             if (tableGet(&vm->classMethods, name, &method)) {
@@ -737,7 +732,7 @@ static bool invoke(DictuVM *vm, ObjString *name, int argCount, bool unpack,
             Value value;
             // Look for the method.
             if (tableGet(&instance->klass->publicMethods, name, &value)) {
-                return call(vm, AS_CLOSURE(value), argCount, await);
+                return call(vm, AS_CLOSURE(value), argCount);
             }
 
             // Check for instance methods.
@@ -748,7 +743,7 @@ static bool invoke(DictuVM *vm, ObjString *name, int argCount, bool unpack,
             // Look for a field which may shadow a method.
             if (tableGet(&instance->publicAttributes, name, &value)) {
                 vm->stackTop[-argCount - 1] = value;
-                return callValue(vm, value, argCount, unpack, await);
+                return callValue(vm, value, argCount, unpack);
             }
 
             if (tableGet(&instance->klass->privateMethods, name, &value)) {
@@ -794,7 +789,7 @@ static bool invoke(DictuVM *vm, ObjString *name, int argCount, bool unpack,
                     vm->stackTop[-i] = peek(vm, i);
                 }
 
-                return call(vm, AS_CLOSURE(value), argCount + 1, await);
+                return call(vm, AS_CLOSURE(value), argCount + 1);
             }
 
             runtimeError(vm, "List has no method %s().", name->chars);
@@ -814,7 +809,7 @@ static bool invoke(DictuVM *vm, ObjString *name, int argCount, bool unpack,
                     vm->stackTop[-i] = peek(vm, i);
                 }
 
-                return call(vm, AS_CLOSURE(value), argCount + 1, await);
+                return call(vm, AS_CLOSURE(value), argCount + 1);
             }
 
             runtimeError(vm, "Dict has no method %s().", name->chars);
@@ -854,7 +849,7 @@ static bool invoke(DictuVM *vm, ObjString *name, int argCount, bool unpack,
                     vm->stackTop[-i] = peek(vm, i);
                 }
 
-                return call(vm, AS_CLOSURE(value), argCount + 1, await);
+                return call(vm, AS_CLOSURE(value), argCount + 1);
             }
 
             runtimeError(vm, "Result has no method %s().", name->chars);
@@ -888,13 +883,13 @@ static bool invoke(DictuVM *vm, ObjString *name, int argCount, bool unpack,
                     vm->stackTop[-i] = peek(vm, i);
                 }
 
-                return call(vm, AS_CLOSURE(value), argCount + 1, await);
+                return call(vm, AS_CLOSURE(value), argCount + 1);
             }
 
             ObjEnum *enumObj = AS_ENUM(receiver);
 
             if (tableGet(&enumObj->values, name, &value)) {
-                return callValue(vm, value, argCount, false, await);
+                return callValue(vm, value, argCount, false);
             }
 
             runtimeError(vm, "Enum has no method '%s'.", name->chars);
@@ -1055,14 +1050,9 @@ static void setReplVar(DictuVM *vm, Value value) {
     tableSet(vm, &vm->globals, vm->replVar, value);
 }
 
-static DictuInterpretResult asyncFreezeState(DictuVM *vm, int argCount,
-                                             CallFrame *frame,
+static DictuInterpretResult asyncFreezeState(DictuVM *vm,
                                              AsyncContext *targetContext) {
-    UNUSED(frame);
-    UNUSED(argCount);
-    Value target = pop(vm);
-
-    push(vm, target);
+    Value target = peek(vm, 0);
 
     AsyncContext *ctx = copyVmState(vm);
     if (targetContext->result)
@@ -1973,7 +1963,7 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame,
             push(vm, OBJ_VAL(closure));
 
             frame->ip = ip;
-            call(vm, closure, 0, false);
+            call(vm, closure, 0);
             frame = &vm->frames[vm->frameCount - 1];
             ip = frame->ip;
 
@@ -2002,7 +1992,7 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame,
 
             if (IS_CLOSURE(module)) {
                 frame->ip = ip;
-                call(vm, AS_CLOSURE(module), 0, false);
+                call(vm, AS_CLOSURE(module), 0);
                 frame = &vm->frames[vm->frameCount - 1];
                 ip = frame->ip;
 
@@ -2440,16 +2430,12 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame,
         CASE_CODE(CALL) : {
             int argCount = READ_BYTE();
             bool unpack = READ_BYTE();
-            bool await = READ_BYTE();
             frame->ip = ip;
             Value f = peek(vm, argCount);
-            if (!callValue(vm, f, argCount, unpack, await)) {
+            if (!callValue(vm, f, argCount, unpack)) {
                 return INTERPRET_RUNTIME_ERROR;
             }
 
-            if (await) {
-                return asyncFreezeState(vm, argCount, frame, targetContext);
-            }
             frame = &vm->frames[vm->frameCount - 1];
             ip = frame->ip;
             DISPATCH();
@@ -2459,16 +2445,12 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame,
             int argCount = READ_BYTE();
             ObjString *method = READ_STRING();
             bool unpack = READ_BYTE();
-            bool await = READ_BYTE();
 
             frame->ip = ip;
-            if (!invoke(vm, method, argCount, unpack, await)) {
+            if (!invoke(vm, method, argCount, unpack)) {
                 return INTERPRET_RUNTIME_ERROR;
             }
 
-            if (await) {
-                return asyncFreezeState(vm, argCount, frame, targetContext);
-            }
             frame = &vm->frames[vm->frameCount - 1];
             ip = frame->ip;
             DISPATCH();
@@ -2478,16 +2460,12 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame,
             int argCount = READ_BYTE();
             ObjString *method = READ_STRING();
             bool unpack = READ_BYTE();
-            bool await = READ_BYTE();
 
             frame->ip = ip;
-            if (!invokeInternal(vm, method, argCount, unpack, await)) {
+            if (!invokeInternal(vm, method, argCount, unpack)) {
                 return INTERPRET_RUNTIME_ERROR;
             }
 
-            if (await) {
-                return asyncFreezeState(vm, argCount, frame, targetContext);
-            }
             frame = &vm->frames[vm->frameCount - 1];
             ip = frame->ip;
             DISPATCH();
@@ -2500,8 +2478,7 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame,
 
             frame->ip = ip;
             ObjClass *superclass = AS_CLASS(pop(vm));
-            if (!invokeFromClass(vm, superclass, method, argCount, unpack,
-                                 false)) {
+            if (!invokeFromClass(vm, superclass, method, argCount, unpack)) {
                 return INTERPRET_RUNTIME_ERROR;
             }
             frame = &vm->frames[vm->frameCount - 1];
@@ -2610,6 +2587,23 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame,
                 return INTERPRET_RUNTIME_ERROR;
             }
 
+            DISPATCH();
+        }
+
+        CASE_CODE(AWAIT) : {
+            Value current = peek(vm, 0);
+            if (IS_FUTURE(current)) {
+                ObjFuture *future = AS_FUTURE(current);
+                if (future->pending) {
+                    assert(!future->consumed);
+                    future->isAwait = true;
+                    future->consumed = true;
+                    return asyncFreezeState(vm, targetContext);
+                } else {
+                    pop(vm);
+                    push(vm, future->result);
+                }
+            }
             DISPATCH();
         }
 
@@ -2785,6 +2779,12 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame,
 //     return runWithBreakFrame(vm, -1, NULL);
 // }
 
+void release_uv_timer(uv_handle_t *handle) {
+    TaskTimer *timer = handle->data;
+    timer->handle = NULL;
+    FREE(vmFromUvHandle((uv_handle_t *)handle), uv_timer_t, handle);
+}
+
 DictuInterpretResult run_task(DictuVM *vm, Task *t) {
     if (t->frame) {
         CallFrame current = vm->frames[vm->frameCount - 1];
@@ -2846,7 +2846,11 @@ DictuInterpretResult run_task(DictuVM *vm, Task *t) {
             if (result != INTERPRET_OK)
                 return result;
         next:
-            t->asyncContext->refs--;
+            if (t->asyncContext->ref) {
+                refAsyncContext(t->asyncContext->ref, false);
+                t->asyncContext->ref = NULL;
+            }
+            refAsyncContext(t->asyncContext, false);
             vm->asyncContextInScope = NULL;
             vm->stack = localStack;
             vm->stackTop = vm->stack + stackTopCurrent;
@@ -2861,27 +2865,36 @@ DictuInterpretResult run_task(DictuVM *vm, Task *t) {
 }
 
 void el_task_cb(uv_idle_t *handle) {
-    DictuVM *vm = vmFromUvHandle((uv_handle_t*)handle);
-    Task *t = popTask(vm, true);
-    if(!t) {
-        if(vm->timerAmount == 0 && vm->taskCount == 0) {
-            uv_idle_stop(handle);
-        }
-        if(vm->taskCount == 0)
-            msleep(1);
+    DictuVM *vm = vmFromUvHandle((uv_handle_t *)handle);
+    if (vm->timerAmount == 0 && vm->taskCount == 0) {
+        uv_idle_stop(handle);
+        uv_close((uv_handle_t *)handle, NULL);
         return;
     }
+    bool hasImmidiateTasks = false;
+    for (int i = 0; i < vm->taskCount; i++) {
+        Task *task = vm->tasks[i];
+        if (task->asyncContext && task->waitFor && task->waitFor->pending)
+            continue;
+        hasImmidiateTasks = true;
+        break;
+    }
+    if (!hasImmidiateTasks) {
+        msleep(1);
+        return;
+    }
+    Task *t = popTask(vm, true);
     DictuInterpretResult res = run_task(vm, t);
     FREE(vm, Task, t);
-    if(res != INTERPRET_OK){
-        uv_loop_t* loop = uv_handle_get_loop((uv_handle_t*)handle);
+    if (res != INTERPRET_OK) {
+        uv_loop_t *loop = uv_handle_get_loop((uv_handle_t *)handle);
         uv_stop(loop);
     }
 }
 void el_timer_cb(uv_timer_t *handle) {
-    TaskTimer* timer = handle->data;
-    DictuVM* vm = vmFromUvHandle((uv_handle_t*)handle);
-    AsyncContext* ctx = timer->context;
+    TaskTimer *timer = handle->data;
+    DictuVM *vm = vmFromUvHandle((uv_handle_t *)handle);
+    AsyncContext *ctx = timer->context;
     Value *localStack = vm->stack;
     int stackTopCurrent = vm->stackTop - vm->stack;
     CallFrame *frames = vm->frames;
@@ -2895,16 +2908,15 @@ void el_timer_cb(uv_timer_t *handle) {
     vm->frameCount = ctx->frameCount;
     vm->asyncContextInScope = ctx;
     vm->openUpvalues = ctx->openUpvalues;
-    CallFrame saveFrame = vm->frames[vm->frameCount-1];
-    DictuInterpretResult result = runWithBreakFrame(
-        vm, ctx->breakFrame, ctx);
+    CallFrame saveFrame = vm->frames[vm->frameCount - 1];
+    DictuInterpretResult result = runWithBreakFrame(vm, ctx->breakFrame, ctx);
 
     if (result != INTERPRET_OK) {
-        uv_loop_t* loop = uv_handle_get_loop((uv_handle_t*)handle);
+        uv_loop_t *loop = uv_handle_get_loop((uv_handle_t *)handle);
         uv_stop(loop);
         return;
     }
-  
+
     vm->asyncContextInScope = NULL;
     vm->stack = localStack;
     vm->stackTop = vm->stack + stackTopCurrent;
@@ -2913,16 +2925,18 @@ void el_timer_cb(uv_timer_t *handle) {
     vm->frameCapacity = frameCapacity;
     vm->openUpvalues = upValues;
     timer->runCount++;
-    if(!timer->timeout) {
-        ctx->frames[ctx->frameCount-1] = saveFrame;
+    if (!timer->timeout) {
+        ctx->frames[ctx->frameCount - 1] = saveFrame;
         return;
     }
-    ctx->refs--;
+    uv_timer_stop(handle);
+    uv_close((uv_handle_t*)handle, release_uv_timer);
+    refAsyncContext(ctx, false);
     vm->timerAmount--;
 }
 
 static DictuInterpretResult runEventLoop(DictuVM *vm) {
-    uv_loop_t* loop = uv_default_loop();
+    uv_loop_t *loop = uv_default_loop();
     uv_loop_set_data(loop, vm);
     vm->uv_loop = loop;
     // Task runner
@@ -2930,7 +2944,12 @@ static DictuInterpretResult runEventLoop(DictuVM *vm) {
     uv_idle_init(loop, &t);
     uv_idle_start(&t, el_task_cb);
     int result = uv_run(loop, UV_RUN_DEFAULT);
-    uv_close((uv_handle_t*)&t, NULL);
+    uv_loop_close(loop);
+    if (vm->asyncContextCount) {
+        for (int i = 0; i < vm->asyncContextCount; i++)
+            vm->asyncContexts[i]->refCount = 0;
+        collectGarbage(vm);
+    }
     return result ? INTERPRET_RUNTIME_ERROR : INTERPRET_OK;
 }
 
@@ -2952,7 +2971,7 @@ DictuInterpretResult dictuInterpret(DictuVM *vm, char *moduleName,
     ObjClosure *closure = newClosure(vm, function);
     pop(vm);
     push(vm, OBJ_VAL(closure));
-    callValue(vm, OBJ_VAL(closure), 0, false, false);
+    callValue(vm, OBJ_VAL(closure), 0, false);
     Task *task = createTask(vm, false);
     task->frame = &vm->frames[vm->frameCount - 1];
     DictuInterpretResult result = runEventLoop(vm);

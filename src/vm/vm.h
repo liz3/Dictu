@@ -26,7 +26,7 @@ typedef struct asyncContext {
     int stackSize;
     ObjUpvalue *openUpvalues;
     struct asyncContext *ref;
-    int refs;
+    int refCount;
 } AsyncContext;
 
 typedef struct {
@@ -111,5 +111,8 @@ AsyncContext *copyVmState(DictuVM *vm);
 void releaseAsyncContext(DictuVM *vm, AsyncContext *ctx);
 
 void el_timer_cb(uv_timer_t *handle);
+void release_uv_timer(uv_handle_t *handle);
+
+void refAsyncContext(AsyncContext* ctx, bool ref);
 
 #endif

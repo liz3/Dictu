@@ -326,7 +326,7 @@ void collectGarbage(DictuVM *vm) {
     
     for (int i = 0; i < vm->asyncContextCount; i++) {
         AsyncContext *ctx = vm->asyncContexts[i];
-        if (ctx->refs > 0) {
+        if (ctx->refCount > 0) {
             if (ctx->result)
                 grayObject(vm, (Obj *)ctx->result);
             for (Value *slot = ctx->stack; slot < ctx->stack + ctx->stackSize;

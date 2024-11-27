@@ -166,7 +166,6 @@ static void initCompiler(Parser *parser, Compiler *compiler, Compiler *parent, F
     compiler->classAnnotations = NULL;
     compiler->methodAnnotations = NULL;
     compiler->fieldAnnotations = NULL;
-    compiler->await = false;
     memset(compiler->locals, 0, sizeof(Local) * UINT8_COUNT);
 
     if (parent != NULL) {
@@ -680,7 +679,7 @@ static void call(Compiler *compiler, LangToken previousToken, bool canAssign) {
     int argCount = argumentList(compiler, &unpack);
 
     emitBytes(compiler, OP_CALL, argCount);
-    emitBytes(compiler, unpack, compiler->await);
+    emitByte(compiler, unpack);
 }
 
 static bool privatePropertyExists(LangToken name, Compiler *compiler) {
@@ -709,7 +708,6 @@ static void dot(Compiler *compiler, LangToken previousToken, bool canAssign) {
         }
 
         emitBytes(compiler, name, unpack);
-        emitByte(compiler, compiler->await);
         return;
     }
 
@@ -1502,10 +1500,17 @@ static void unary(Compiler *compiler, bool canAssign) {
 }
 
 static void await(Compiler *compiler, bool canAssign) {
+    if (compiler->function == NULL) {
+        error(compiler->parser, "Cannot utilise 'await' outside of a async function.");
+        return;
+    }
+     if (!compiler->function->async) {
+        error(compiler->parser, "Cannot utilise 'await' outside of a non async function.");
+        return;
+    }
     UNUSED(canAssign);
-    compiler->await = true;
     expression(compiler);
-    compiler->await = false;
+    emitByte(compiler, OP_AWAIT);
 }
 
 ParseRule rules[] = {

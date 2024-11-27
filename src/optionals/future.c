@@ -7,15 +7,11 @@ typedef struct {
 
 #define AS_TASK_TIMER(v) ((TaskTimerAbstract *)AS_ABSTRACT(v)->data)
 
-void release_uv_timer(uv_handle_t *handle) {
-    FREE(vmFromUvHandle((uv_handle_t *)handle), uv_timer_t, handle);
-}
 
 void freeTaskTimerAbstract(DictuVM *vm, ObjAbstract *abstract) {
     TaskTimerAbstract *timer = (TaskTimerAbstract *)abstract->data;
     if (timer->timer->handle) {
         uv_close((uv_handle_t *)timer->timer->handle, release_uv_timer);
-        timer->timer->handle = NULL;
     }
     if (timer->timer->context) {
         releaseAsyncContext(vm, timer->timer->context);
@@ -62,12 +58,12 @@ static Value cancelTimer(DictuVM *vm, int argCount, Value *args) {
     uv_timer_stop(tta->timer->handle);
     if (!tta->timer->timeout || tta->timer->runCount == 0) {
         if(!tta->timer->timeout)
-           tta->timer->context->refs--;
+           refAsyncContext(tta->timer->context, false);
         vm->timerAmount--;
         if (tta->timer->handle) {
             uv_close((uv_handle_t *)tta->timer->handle,
                      release_uv_timer);
-            tta->timer->handle = NULL;
+            
         }
     }
     return BOOL_VAL(true);
@@ -134,7 +130,7 @@ static Value createTimer(DictuVM *vm, int argCount, Value *args, bool timeout) {
 
     if (vm->asyncContextInScope) {
         context->ref = vm->asyncContextInScope;
-        vm->asyncContextInScope->refs++;
+        refAsyncContext(vm->asyncContextInScope, true);
     }
     context->stack[context->stackSize++] = args[1];
     timer->handle = handle;

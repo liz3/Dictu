@@ -1,31 +1,31 @@
 #include "future.h"
 
 static Value setResolved(DictuVM *vm, int argCount, Value *args) {
-    if (argCount != 1)
-        return EMPTY_VAL;
+    Value resolve = argCount == 0 ? NIL_VAL : args[1];
     ObjFuture *future = AS_FUTURE(args[0]);
-        if (future->controlled) {
-      runtimeError(vm, "Cannot resolve a controlled future.");
-      return EMPTY_VAL;
+    if (future->controlled) {
+        runtimeError(vm, "Cannot resolve a controlled future.");
+        return EMPTY_VAL;
     }
     if (!future->pending)
         return EMPTY_VAL;
     future->pending = false;
-    future->result = newResultSuccess(vm, args[1]);
+    future->result = newResultSuccess(vm, resolve);
     return args[0];
 }
 
 static Value setRejected(DictuVM *vm, int argCount, Value *args) {
-    if (argCount != 1)
+    if (argCount < 1) {
+        runtimeError(vm, "reject() requires one argument.");
+    }
+    if (!IS_STRING(args[1])) {
+        runtimeError(vm, "reject() Value can only be a string.");
         return EMPTY_VAL;
-      if(!IS_STRING(args[1])){
-          runtimeError(vm, "Reject Value can only be a string.");
-          return EMPTY_VAL;
-      }
+    }
     ObjFuture *future = AS_FUTURE(args[0]);
     if (future->controlled) {
-      runtimeError(vm, "Cannot reject a controlled future.");
-      return EMPTY_VAL;
+        runtimeError(vm, "Cannot reject() a read only future.");
+        return EMPTY_VAL;
     }
     if (!future->pending)
         return EMPTY_VAL;
@@ -51,21 +51,20 @@ static Value then(DictuVM *vm, int argCount, Value *args) {
         frame->closure = closure;
         frame->ip = closure->function->chunk.code;
     }
-    if(vm->asyncContextInScope){
-      context->ref = vm->asyncContextInScope;
-      vm->asyncContextInScope->refs++;
+    if (vm->asyncContextInScope) {
+        context->ref = vm->asyncContextInScope;
+        refAsyncContext(vm->asyncContextInScope, true);
     }
     context->stack[context->stackSize++] = args[1];
     context->stack[context->stackSize++] = args[0];
     future->consumed = true;
-    frame->slots = context->stack+(context->stackSize -1);
-    Task* t = createTask(vm, true);
+    frame->slots = context->stack + (context->stackSize - 1);
+    Task *t = createTask(vm, true);
     t->asyncContext = context;
     t->waitFor = future;
 
     return args[0];
 }
-
 
 void declareFutureMethods(DictuVM *vm) {
     defineNative(vm, &vm->futureMethods, "resolve", setResolved);
