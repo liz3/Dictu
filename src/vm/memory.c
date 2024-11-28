@@ -3,6 +3,7 @@
 #include "common.h"
 #include "compiler.h"
 #include "memory.h"
+#include "datatypes/files.h"
 #include "object.h"
 #include "value.h"
 #include "vm.h"
@@ -285,6 +286,11 @@ void freeObject(DictuVM *vm, Obj *object) {
         case OBJ_FILE: {
             ObjFile* file = (ObjFile*) object;
             if(file->asyncApi) {
+                if(file->asyncApi->fd != 0 && file->asyncApi->ready){
+                    // see files.c:gc_async_close_file
+                    async_maybe_close_file(vm, file, true);
+                    break;
+                } 
                 FREE(vm, AsyncFile, file->asyncApi);
                 file->asyncApi = NULL;
             }
@@ -409,8 +415,6 @@ void collectGarbage(DictuVM *vm) {
         }
     }
 
-    for(int i = 0; i < vm->asyncContextCount; i++)
-        releaseAsyncContext(vm, vm->asyncContexts[i]);
     // Adjust the heap size based on live memory.
     vm->nextGC = vm->bytesAllocated * GC_HEAP_GROW_FACTOR;
 

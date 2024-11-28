@@ -21,5 +21,6 @@ void declareFileMethods(DictuVM *vm);
 
 void openFile(DictuVM* vm, ObjFile* file);
 void closeFile(DictuVM *vm, ObjFile *file);
+void async_maybe_close_file(DictuVM *vm, ObjFile *file, bool release);
 
 #endif //dictu_files_h

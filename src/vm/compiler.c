@@ -1586,6 +1586,7 @@ ParseRule rules[] = {
         {NULL,     NULL,      PREC_NONE},               // TOKEN_RETURN
         {NULL,     NULL,      PREC_NONE},               // TOKEN_CONTINUE
         {NULL,     NULL,      PREC_NONE},               // TOKEN_WITH
+        {NULL,     NULL,      PREC_NONE},               // TOKEN_ASYNC_WITH
         {NULL,     NULL,      PREC_NONE},               // TOKEN_EOF
         {NULL,     NULL,      PREC_NONE},               // TOKEN_IMPORT
         {NULL,     NULL,      PREC_NONE},               // TOKEN_FROM
@@ -2582,18 +2583,13 @@ static void switchStatement(Compiler *compiler) {
     }
 }
 
-static void withStatement(Compiler *compiler) {
+static void withStatement(Compiler *compiler, bool isAsync) {
     consume(compiler, TOKEN_LEFT_PAREN, "Expect '(' after 'with'.");
     expression(compiler);
     consume(compiler, TOKEN_COMMA, "Expect comma");
     expression(compiler);
-    if(match(compiler, TOKEN_COMMA)){
-        expression(compiler);
-    } else {
-        emitByte(compiler, OP_FALSE);
-    }
     consume(compiler, TOKEN_RIGHT_PAREN, "Expect ')' after 'with'.");
-
+    emitByte(compiler, isAsync ? OP_TRUE : OP_FALSE);
     int fileIndex = compiler->localCount;
     Local *local = &compiler->locals[compiler->localCount++];
  
@@ -2972,7 +2968,9 @@ static void statement(Compiler *compiler) {
     } else if (match(compiler, TOKEN_RETURN)) {
         returnStatement(compiler);
     } else if (match(compiler, TOKEN_WITH)) {
-        withStatement(compiler);
+        withStatement(compiler, false);
+    } else if (match(compiler, TOKEN_ASYNC_WITH)) {
+        withStatement(compiler, true);
     } else if (match(compiler, TOKEN_IMPORT)) {
         importStatement(compiler);
     } else if (match(compiler, TOKEN_FROM)) {

@@ -171,7 +171,9 @@ struct sObjSet {
 
 typedef struct {
     bool ready;
+    bool shouldClose;
     ssize_t fd;
+    int refs;
     ObjFuture* readyFuture;
 } AsyncFile;
 
@@ -215,6 +217,7 @@ struct sObjFuture {
     bool isAwait;
     bool consumed;
     bool controlled;
+    
     Value result;
 };
 

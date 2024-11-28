@@ -145,10 +145,10 @@ void releaseAsyncContext(DictuVM *vm, AsyncContext *ctx) {
                 vm->asyncContexts[i - 1] = vm->asyncContexts[i];
             }
         }
+        vm->asyncContextCount--;
         vm->asyncContexts =
             SHRINK_ARRAY(vm, vm->asyncContexts, AsyncContext *,
-                         vm->asyncContextCount, vm->asyncContextCount - 1);
-        vm->asyncContextCount--;
+                         vm->asyncContextCount + 1, vm->asyncContextCount);
     }
 }
 void pushTask(DictuVM *vm, Task *ctx, bool prepend) {
@@ -2728,7 +2728,7 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame,
             Value fileName = peek(vm, 2);
             Value useAsyncApi = peek(vm, 0);
 
-            if(!IS_BOOL(useAsyncApi)) {
+            if (!IS_BOOL(useAsyncApi)) {
                 RUNTIME_ERROR("File async option must be a bool");
             }
 
@@ -2745,13 +2745,12 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame,
             bool asyncApi = AS_BOOL(useAsyncApi);
 
             ObjFile *file = newFile(vm);
-         
+
             file->path = fileNameString->chars;
             file->openType = openTypeString->chars;
             file->asyncApi = asyncApi ? ALLOCATE(vm, AsyncFile, 1) : NULL;
-            
-            openFile(vm, file);
 
+            openFile(vm, file);
 
             pop(vm);
             pop(vm);
@@ -2876,6 +2875,12 @@ void el_task_cb(uv_idle_t *handle) {
     if (vm->timerAmount == 0 && vm->taskCount == 0) {
         uv_idle_stop(handle);
         uv_close((uv_handle_t *)handle, NULL);
+        while (vm->asyncContextCount) {
+            vm->asyncContexts[0]->refCount = 0;
+            releaseAsyncContext(vm, vm->asyncContexts[0]);
+        }
+        collectGarbage(vm);
+
         return;
     }
     bool hasImmidiateTasks = false;
@@ -2937,7 +2942,7 @@ void el_timer_cb(uv_timer_t *handle) {
         return;
     }
     uv_timer_stop(handle);
-    uv_close((uv_handle_t*)handle, release_uv_timer);
+    uv_close((uv_handle_t *)handle, release_uv_timer);
     refAsyncContext(ctx, false);
     vm->timerAmount--;
 }
@@ -2952,11 +2957,6 @@ static DictuInterpretResult runEventLoop(DictuVM *vm) {
     uv_idle_start(&t, el_task_cb);
     int result = uv_run(loop, UV_RUN_DEFAULT);
     uv_loop_close(loop);
-    if (vm->asyncContextCount) {
-        for (int i = 0; i < vm->asyncContextCount; i++)
-            vm->asyncContexts[i]->refCount = 0;
-        collectGarbage(vm);
-    }
     return result ? INTERPRET_RUNTIME_ERROR : INTERPRET_OK;
 }
 
