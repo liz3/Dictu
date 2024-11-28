@@ -1,5 +1,6 @@
 #define DICTU_UNITTEST_SOURCE "import Inspect;\n" \
 "import System;\n" \
+"import Future;\n" \
 "\n" \
 "abstract class UnitTest {\n" \
 "    const METHOD_NAME_PADDING = '    ';\n" \
@@ -36,11 +37,12 @@
 "\n" \
 "    }\n" \
 "\n" \
-"    run() {\n" \
+"    async run() {\n" \
 "        const methods = this.filterMethods();\n" \
 "\n" \
 "        print(Inspect.getFile(1));\n" \
-"        methods.forEach(def (method) => {\n" \
+"        for(var i = 0; i < methods.len(); i+=1) {\n" \
+"            const method = methods[i];\n" \
 "            print('{}{}()'.format(UnitTest.METHOD_NAME_PADDING, method));\n" \
 "\n" \
 "            const providerMethodName = '{}Provider'.format(method);\n" \
@@ -49,22 +51,24 @@
 "                const testValue = this.getAttribute(providerMethodName)();\n" \
 "\n" \
 "                if (type(testValue) == 'list') {\n" \
-"                    testValue.forEach(def (val) => {\n" \
+"                    for(var x = 0; x < testValue.len(); x+=1){\n" \
 "                        this.setUp();\n" \
-"                        this.getAttribute(method)(val);\n" \
+"                        await this.getAttribute(method)(val);\n" \
 "                        this.tearDown();\n" \
-"                    });\n" \
+"                    }\n" \
 "                } else {\n" \
 "                    this.setUp();\n" \
-"                    this.getAttribute(method)(testValue);\n" \
+"                    await this.getAttribute(method)(testValue);\n" \
 "                    this.tearDown();\n" \
 "                }\n" \
 "            } else {\n" \
 "                this.setUp();\n" \
-"                this.getAttribute(method)();\n" \
+"                await this.getAttribute(method)();\n" \
 "                this.tearDown();\n" \
 "            }\n" \
-"        });\n" \
+"        }\n" \
+"\n" \
+"\n" \
 "        print('\nResults:\n{}- {} assertion(s) were successful.\n{}- {} assertion(s) were failures.\n{}- {} method(s) were skipped.\n'.format(\n" \
 "            UnitTest.RESULTS_PADDING,\n" \
 "            this.results['passed'],\n" \

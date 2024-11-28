@@ -1,5 +1,6 @@
 import Inspect;
 import System;
+import Future;
 
 abstract class UnitTest {
     const METHOD_NAME_PADDING = '    ';
@@ -36,11 +37,12 @@ abstract class UnitTest {
 
     }
 
-    run() {
+    async run() {
         const methods = this.filterMethods();
 
         print(Inspect.getFile(1));
-        methods.forEach(def (method) => {
+        for(var i = 0; i < methods.len(); i+=1) {
+            const method = methods[i];
             print('{}{}()'.format(UnitTest.METHOD_NAME_PADDING, method));
 
             const providerMethodName = '{}Provider'.format(method);
@@ -49,22 +51,24 @@ abstract class UnitTest {
                 const testValue = this.getAttribute(providerMethodName)();
 
                 if (type(testValue) == 'list') {
-                    testValue.forEach(def (val) => {
+                    for(var x = 0; x < testValue.len(); x+=1){
                         this.setUp();
-                        this.getAttribute(method)(val);
+                        await this.getAttribute(method)(val);
                         this.tearDown();
-                    });
+                    }
                 } else {
                     this.setUp();
-                    this.getAttribute(method)(testValue);
+                    await this.getAttribute(method)(testValue);
                     this.tearDown();
                 }
             } else {
                 this.setUp();
-                this.getAttribute(method)();
+                await this.getAttribute(method)();
                 this.tearDown();
             }
-        });
+        }
+
+
         print('\nResults:\n{}- {} assertion(s) were successful.\n{}- {} assertion(s) were failures.\n{}- {} method(s) were skipped.\n'.format(
             UnitTest.RESULTS_PADDING,
             this.results['passed'],

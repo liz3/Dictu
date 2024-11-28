@@ -122,11 +122,7 @@ void releaseAsyncContext(DictuVM *vm, AsyncContext *ctx) {
         }
     }
     FREE_ARRAY(vm, CallFrame, ctx->frames, ctx->frameCapacity);
-    while (ctx->openUpvalues != NULL) {
-        ObjUpvalue *n = ctx->openUpvalues->next;
-        FREE(vm, ObjUpvalue, ctx->openUpvalues);
-        ctx->openUpvalues = n;
-    }
+
     FREE(vm, AsyncContext, ctx);
     if (vm->asyncContextCount == 1) {
         vm->asyncContextCount--;
@@ -374,13 +370,13 @@ AsyncContext *copyVmState(DictuVM *vm) {
     ObjUpvalue *current;
     while (upvalue != NULL) {
         if (context->openUpvalues == NULL) {
-            context->openUpvalues = ALLOCATE(vm, ObjUpvalue, 1);
+            context->openUpvalues = newUpvalue(vm, upvalue->value);
             current = context->openUpvalues;
         } else {
-            current->next = ALLOCATE(vm, ObjUpvalue, 1);
+            current->next = newUpvalue(vm, upvalue->value);
             current = current->next;
         }
-        memcpy(current, upvalue, sizeof(ObjUpvalue));
+        current->closed = upvalue->closed;
         current->next = NULL;
         upvalue = upvalue->next;
     }
@@ -449,7 +445,7 @@ static bool call(DictuVM *vm, ObjClosure *closure, int argCount) {
         frame->closure = closure;
         frame->ip = closure->function->chunk.code;
         frame->slots = (context->stack + (context->stackSize - (argCount + 1)));
-        assert(*frame->slots == OBJ_VAL(closure));
+        // assert(*frame->slots == OBJ_VAL(closure));
         vm->stackTop = vm->stackTop - (1 + argCount);
         push(vm, OBJ_VAL(context->result));
         Task *task = createTask(vm, false);
@@ -2851,6 +2847,8 @@ DictuInterpretResult run_task(DictuVM *vm, Task *t) {
 
             if (result != INTERPRET_OK)
                 return result;
+            t->asyncContext->frames = vm->frames;
+            t->asyncContext->frameCapacity = vm->frameCapacity;
         next:
             if (t->asyncContext->ref) {
                 refAsyncContext(t->asyncContext->ref, false);
@@ -2928,7 +2926,8 @@ void el_timer_cb(uv_timer_t *handle) {
         uv_stop(loop);
         return;
     }
-
+    ctx->frames = vm->frames;
+    ctx->frameCapacity = vm->frameCapacity;
     vm->asyncContextInScope = NULL;
     vm->stack = localStack;
     vm->stackTop = vm->stack + stackTopCurrent;

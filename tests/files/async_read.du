@@ -1,0 +1,103 @@
+/**
+ * read.du
+ *
+ * Testing file reading with async read()
+ */
+from UnitTest import UnitTest;
+import Future;
+
+class TestFileReading < UnitTest {
+    const EXPECTED = "Dictu is great!\n" +
+        "Dictu is great!\n" +
+        "Dictu is great!\n" +
+        "Dictu is great!\n" +
+        "Dictu is great!\n" +
+        "\n" +
+        "\n" +
+        "Dictu is great!\n" +
+        "Dictu is great!\n" +
+        "Dictu is great!\n" +
+        "Dictu is great!\n" +
+        "Dictu is great!";
+    const EXPECTED2 = "This is another file";
+
+    async testFileRead() {
+        var contents;
+
+        asyncWith("tests/files/read.txt", "r") {
+            await file.isReady();
+            contents = await file.read();
+            contents = contents.unwrap();
+        }
+
+        this.assertType(contents, "string");
+        this.assertEquals(contents, TestFileReading.EXPECTED);
+    }
+    async testFileReadCustomName() {
+        var contents;
+
+        asyncWith("tests/files/read.txt", "r") as f {
+            await f.isReady();
+            contents = await f.read();
+            contents = contents.unwrap();
+        }
+
+        this.assertType(contents, "string");
+        this.assertEquals(contents, TestFileReading.EXPECTED);
+    }
+    testFileReadNested() {
+        const ft = Future.new();
+        var contents;
+
+        asyncWith("tests/files/read.txt", "r") {
+            file.isReady().result(def(ignored) => {
+                file.read().result(def(result) => {
+                    contents = result.unwrap();
+                    asyncWith("tests/files/read2.txt", "r") as otherFile {
+                        otherFile.isReady().result(def(ignored) => {
+                             otherFile.read().result(def(otherResult) => {
+                                contents += otherResult.unwrap();
+                                this.assertType(contents, "string");
+                                this.assertEquals(contents, TestFileReading.EXPECTED + TestFileReading.EXPECTED2);
+                                ft.resolve();
+                            });
+                        });
+                    }
+               });
+
+            });
+        }
+        return ft;
+    }
+
+    testFileReadNestedShadow() {
+        var contents;
+        const oft = Future.new();
+
+        asyncWith("tests/files/read.txt", "r") {
+            var innerFuture = Future.new();
+            asyncWith("tests/files/read2.txt", "r") {
+               file.isReady().result(def(ignored) => {
+                   file.read().result(def(r) => innerFuture.resolve(r.unwrap()));
+               });
+            }
+            innerFuture.result(def(result) => {
+                contents = result.unwrap();
+                this.assertType(contents, "string");
+                this.assertEquals(contents, TestFileReading.EXPECTED2);
+                file.isReady().result(def(ignored) => {
+                    file.read().result(def(otherResult) => {
+                        contents += otherResult.unwrap();
+                        this.assertType(contents, "string");
+                        this.assertEquals(contents, TestFileReading.EXPECTED2 + TestFileReading.EXPECTED);
+                        oft.resolve();
+                    });
+                });
+            });
+        }
+        return oft;
+    }
+
+}
+
+TestFileReading().run();
