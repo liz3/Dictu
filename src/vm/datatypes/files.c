@@ -12,7 +12,6 @@ uv_fs_t *new_fs_request(DictuVM *vm, ObjFile *file) {
 AsyncFsRequest *new_async_fs_request(DictuVM *vm, ObjFile *file,
                                      ObjFuture *future) {
     AsyncFsRequest *fr = ALLOCATE(vm, AsyncFsRequest, 1);
-    file->asyncApi->refs++;
     fr->file = file;
     fr->vm = vm;
     fr->buffer = NULL;
@@ -24,15 +23,6 @@ AsyncFsRequest *new_async_fs_request(DictuVM *vm, ObjFile *file,
         fr->future->controlled = true;
     }
     return fr;
-}
-
-void async_on_close(uv_fs_t *req) {
-    assert(req->result >= 0);
-    AsyncFsRequest *fr = req->data;
-    DictuVM *vm = fr->vm;
-    uv_fs_req_cleanup(req);
-    FREE(vm, uv_fs_t, req);
-    FREE(vm, AsyncFsRequest, fr);
 }
 
 // on a case where in a async file theres a .then call on is ready but nothing
@@ -49,28 +39,22 @@ void gc_async_close_file(uv_fs_t *req) {
     free(fr);
 }
 
-void async_maybe_close_file(DictuVM *vm, ObjFile *file, bool release) {
-    if ((release && file->asyncApi->ready) || (file->asyncApi && file->asyncApi->ready &&
-                    file->asyncApi->shouldClose && file->asyncApi->refs == 0)) {
+void async_maybe_close_file(DictuVM *vm, ObjFile *file) {
+    if (file->asyncApi->ready) {
         file->asyncApi->ready = false;
         // need to use malloc incase of release, because release means we are
         // coming from within the GC
-        uv_fs_t *close_req =
-            release ? malloc(sizeof(uv_fs_t)) : new_fs_request(vm, file);
-        if (release) {
-            AsyncFsRequest *fr = malloc(sizeof(AsyncFsRequest));
-            fr->vm = vm;
-            fr->file = file;
-            close_req->data = fr;
-        } else {
-            close_req->data = new_async_fs_request(vm, file, NULL);
-        }
+        uv_fs_t *close_req = malloc(sizeof(uv_fs_t));
+
+        AsyncFsRequest *fr = malloc(sizeof(AsyncFsRequest));
+        fr->vm = vm;
+        fr->file = file;
+        close_req->data = fr;
+
         uv_fs_close(vm->uv_loop, close_req, file->asyncApi->fd,
-                    release ? gc_async_close_file : async_on_close);
-        if (release) {
-            FREE(vm, AsyncFile, file->asyncApi);
-            FREE(vm, ObjFile, file);
-        }
+                    gc_async_close_file);
+        FREE(vm, AsyncFile, file->asyncApi);
+        FREE(vm, ObjFile, file);
     }
 }
 void async_on_open(uv_fs_t *req) {
@@ -85,10 +69,6 @@ void async_on_open(uv_fs_t *req) {
         fr->file->asyncApi->ready = true;
         fr->file->asyncApi->fd = req->result;
         fr->future->result = newResultSuccess(vm, TRUE_VAL);
-    }
-    fr->file->asyncApi->refs--;
-    if (!fr->future->consumed) {
-        async_maybe_close_file(vm, fr->file, false);
     }
     uv_fs_req_cleanup(req);
     FREE(vm, uv_fs_t, req);
@@ -105,8 +85,7 @@ void async_on_write(uv_fs_t *req) {
     } else {
         fr->future->result = newResultSuccess(vm, NUMBER_VAL(req->result));
     }
-    fr->file->asyncApi->refs--;
-    async_maybe_close_file(vm, fr->file, false);
+
     FREE_ARRAY(vm, char, fr->buffer, fr->bufferLen);
     uv_fs_req_cleanup(req);
     FREE(vm, uv_fs_t, req);
@@ -145,8 +124,7 @@ void async_on_read(uv_fs_t *req) {
             fr->future->pending = false;
         }
     }
-    fr->file->asyncApi->refs--;
-    async_maybe_close_file(vm, fr->file, false);
+
     uv_fs_req_cleanup(req);
     FREE(vm, uv_fs_t, req);
     FREE(vm, AsyncFsRequest, fr);
@@ -443,9 +421,9 @@ void openFile(DictuVM *vm, ObjFile *file) {
     }
 }
 void closeFile(DictuVM *vm, ObjFile *file) {
+    UNUSED(vm);
     if (file->asyncApi) {
         file->asyncApi->shouldClose = true;
-        async_maybe_close_file(vm, file, false);
         return;
     } else {
         fclose(file->file);

@@ -286,13 +286,9 @@ void freeObject(DictuVM *vm, Obj *object) {
         case OBJ_FILE: {
             ObjFile* file = (ObjFile*) object;
             if(file->asyncApi) {
-                if(file->asyncApi->fd != 0 && file->asyncApi->ready){
-                    // see files.c:gc_async_close_file
-                    async_maybe_close_file(vm, file, true);
-                    break;
-                } 
-                FREE(vm, AsyncFile, file->asyncApi);
-                file->asyncApi = NULL;
+                // see files.c:gc_async_close_file
+                async_maybe_close_file(vm, file);
+                break;
             }
             FREE(vm, ObjFile, object);
             break;
