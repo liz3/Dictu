@@ -1,4 +1,6 @@
 #include <signal.h>
+#include <string.h>
+#include <uv.h>
 #ifdef _WIN32
 #include "windowsapi.h"
 #endif
@@ -8,6 +10,85 @@
 #ifdef _WIN32
 #define pid_t int
 #endif
+
+typedef struct {
+    uv_process_t* process_handle;
+    uv_process_options_t options;
+    Value dataFunction;
+    ObjFuture* future;
+    uv_pipe_t* data_pipes;
+    bool read_start;
+    DictuVM* vm;
+} AsyncProcess;
+
+
+// #define AS_ASYNC_PROCESS(v) ((AsyncProcess*)AS_ABSTRACT(v)->data)
+
+void freeAsyncProcess(DictuVM *vm, ObjAbstract *abstract) {
+    FREE(vm, AsyncProcess, abstract->data);
+}
+
+char *asyncProcessToString(ObjAbstract *abstract) {
+    UNUSED(abstract);
+
+    char *queueString = malloc(sizeof(char) * 15);
+    snprintf(queueString, 15, "<AsyncProcess>");
+    return queueString;
+}
+
+void async_process_close_cb(uv_handle_t* req){
+    AsyncProcess* process = req->data;
+    DictuVM* vm = process->vm;
+    FREE(vm, uv_process_t, process->process_handle);
+    process->process_handle = NULL;
+    FREE(vm, AsyncProcess, process);
+}
+
+void free_async_process(AsyncProcess* process){
+    DictuVM* vm = process->vm;
+    if(process->data_pipes){
+        if(process->read_start){
+            uv_close((uv_handle_t *) process->data_pipes, NULL);
+            uv_close((uv_handle_t *) (process->data_pipes+1), NULL);
+        }
+        FREE_ARRAY(vm, uv_pipe_t, process->data_pipes, 2);
+        process->data_pipes = NULL;
+        process->read_start = false;
+    }
+     uv_close((uv_handle_t *) process->process_handle, async_process_close_cb);
+}
+
+void async_on_read_process(uv_stream_t *stream, ssize_t nread, const uv_buf_t *buf) {
+    AsyncProcess* process = stream->data;
+    if (nread > 0) {
+        ObjString* str = copyString(process->vm, buf->base, nread);
+        Value v = OBJ_VAL(str);
+        callFunction(process->vm, process->dataFunction, 1, &v);
+    } else if (nread < 0) {
+       // TODO need to handle this?
+    }
+    free(buf->base);
+}
+
+void async_on_exit(uv_process_t *req, int64_t exit_status, int term_signal) {
+    AsyncProcess* process = req->data;
+    DictuVM* vm = process->vm;
+    ObjDict* resultDict = newDict(vm);
+    push(vm, OBJ_VAL(resultDict));
+    dictSet(vm, resultDict, OBJ_VAL(copyString(vm, "signal", 6)), NUMBER_VAL(term_signal));
+    dictSet(vm, resultDict, OBJ_VAL(copyString(vm, "code", 4)), NUMBER_VAL(exit_status));
+    ObjFuture* future = process->future;
+    future->pending = false;
+    future->result = newResultSuccess(vm, OBJ_VAL(resultDict));
+    free_async_process(process);
+    pop(vm);
+}
+
+void async_alloc_buffer(uv_handle_t *handle, size_t suggested_size, uv_buf_t *buf) {
+    UNUSED(handle);
+    buf->base = malloc(suggested_size);
+    buf->len = suggested_size;
+}
 
 #ifdef _WIN32
 static char* buildArgs(DictuVM *vm, ObjList* list, int *size) {
@@ -333,6 +414,96 @@ static Value killProcess(DictuVM* vm, int argCount, Value* args) {
 }
 #endif
 
+static Value asyncRunProcess(DictuVM* vm, int argCount, Value* args) {
+    if (argCount != 1 && argCount != 2) {
+        runtimeError(vm, "asyncRun() takes 1 or 2 arguments (%d given)", argCount);
+        return EMPTY_VAL;
+    }
+
+    if (!IS_LIST(args[0])) {
+        runtimeError(vm, "Argument passed to asyncRun() must be a list");
+        return EMPTY_VAL;
+    }
+     if(argCount == 2 && !IS_CLOSURE(args[1])){
+        runtimeError(vm, "Second Argument passed to asyncRun() must be a function");
+        return EMPTY_VAL;
+    }
+    ObjList* argList = AS_LIST(args[0]);
+    char** arguments = ALLOCATE(vm, char*, argList->values.count + 1);
+    for (int i = 0; i < argList->values.count; ++i) {
+        if (!IS_STRING(argList->values.values[i])) {
+            return newResultError(vm, "Arguments passed must all be strings");
+        }
+        arguments[i] = AS_CSTRING(argList->values.values[i]);
+    }
+    
+
+    arguments[argList->values.count] = NULL;
+
+    AsyncProcess *process = ALLOCATE(vm, AsyncProcess, 1);
+    process->vm = vm;
+    process->future = newFuture(vm);
+    ObjFuture* future = process->future;
+    process->future->controlled = true;
+    process->read_start = false;
+
+    uv_process_options_t* options = &process->options;
+    memset(options, 0, sizeof(uv_process_options_t));
+    options->exit_cb = async_on_exit;
+    uv_stdio_container_t stdio[3];
+    options->file = arguments[0];
+    options->args = arguments;
+    options->stdio_count = 3;
+    options->stdio = stdio;
+
+    if(argCount == 2){
+        uv_loop_t* loop = vm->uv_loop;
+        process->dataFunction = args[1];
+        process->data_pipes = ALLOCATE(vm, uv_pipe_t, 2);
+        uv_pipe_init(loop, process->data_pipes, 0);
+        uv_pipe_init(loop, process->data_pipes+1, 0);
+        process->data_pipes->data = process;
+        (process->data_pipes+1)->data = process;
+        stdio[0].flags = UV_IGNORE; // Ignore stdin
+        stdio[1].flags = UV_CREATE_PIPE | UV_WRITABLE_PIPE;
+        stdio[1].data.stream = (uv_stream_t *)process->data_pipes;
+        stdio[2].flags = UV_CREATE_PIPE | UV_WRITABLE_PIPE;
+        stdio[2].data.stream = (uv_stream_t *)(process->data_pipes+1);
+    } else {
+        process->dataFunction = NIL_VAL;
+        process->data_pipes = NULL;
+        stdio[0].flags = UV_IGNORE;
+        stdio[1].flags = UV_IGNORE;
+        stdio[2].flags = UV_IGNORE;
+    }
+    ObjDict* resultDict = newDict(vm);
+    push(vm, OBJ_VAL(resultDict));
+    dictSet(vm, resultDict, OBJ_VAL(copyString(vm, "result", 6)), OBJ_VAL(future));
+    process->process_handle = ALLOCATE(vm, uv_process_t, 1);
+
+    process->process_handle->data = process;
+    int res = uv_spawn(vm->uv_loop, process->process_handle, options);
+    if (res) {
+
+        future->pending = false;
+        future->result = newResultError(vm, (char*)uv_strerror(res));
+        free_async_process(process);
+        dictSet(vm, resultDict, OBJ_VAL(copyString(vm, "pid", 3)), NIL_VAL);
+      
+    } else {
+        dictSet(vm, resultDict, OBJ_VAL(copyString(vm, "pid", 3)), NUMBER_VAL(process->process_handle->pid));
+        if(process->data_pipes){
+            process->read_start = true;
+            uv_read_start((uv_stream_t *)process->data_pipes, async_alloc_buffer, async_on_read_process);
+            uv_read_start((uv_stream_t *)process->data_pipes+1, async_alloc_buffer, async_on_read_process);
+        }
+    }
+
+    FREE_ARRAY(vm, char*, arguments, argList->values.count + 1);
+    pop(vm);
+    return OBJ_VAL(resultDict);
+}
+
 Value createProcessModule(DictuVM* vm) {
     ObjString* name = copyString(vm, "Process", 7);
     push(vm, OBJ_VAL(name));
@@ -344,6 +515,7 @@ Value createProcessModule(DictuVM* vm) {
      */
     defineNative(vm, &module->values, "exec", execProcess);
     defineNative(vm, &module->values, "run", runProcess);
+    defineNative(vm, &module->values, "asyncRun", asyncRunProcess);
     defineNative(vm, &module->values, "kill", killProcess);
 
     /**
