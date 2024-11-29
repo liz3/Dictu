@@ -442,6 +442,7 @@ void declareFileMethods(DictuVM *vm) {
 
 void openFile(DictuVM *vm, ObjFile *file) {
     if (file->asyncApi) {
+        file->file = NULL;
         memset(file->asyncApi, 0, sizeof(AsyncFile)); // reset
         ObjFuture *readyFuture = newFuture(vm);
         readyFuture->controlled = true;
@@ -464,7 +465,7 @@ void closeFile(DictuVM *vm, ObjFile *file) {
     if (file->asyncApi) {
         file->asyncApi->shouldClose = true;
         return;
-    } else {
+    } else if(file->file) {
         fclose(file->file);
         file->file = NULL;
     }
