@@ -39,6 +39,19 @@ void gc_async_close_file(uv_fs_t *req) {
     free(fr);
 }
 
+void async_close_file_cb(uv_fs_t *req) {
+    AsyncFsRequest *fr = req->data;
+    DictuVM *vm = fr->vm;
+
+    fr->future->pending = false;
+    fr->future->result = newResultSuccess(vm, TRUE_VAL);
+    fr->future->obj.isDark = false;
+
+    uv_fs_req_cleanup(req);
+    FREE(vm, uv_fs_t, req);
+    FREE(vm, AsyncFsRequest, fr);
+}
+
 void async_maybe_close_file(DictuVM *vm, ObjFile *file) {
     if (file->asyncApi->ready) {
         file->asyncApi->ready = false;
@@ -378,11 +391,8 @@ static Value isReady(DictuVM *vm, int argCount, Value *args) {
         return EMPTY_VAL;
     }
     ObjFile *file = AS_FILE(args[0]);
-    if (!file->asyncApi) {
-        runtimeError(vm, "File does not have the async api enabled.");
-    }
-    assert(file->asyncApi != NULL);
-    if (!file->asyncApi->readyFuture->pending && !file->asyncApi->ready) {
+
+    if (!file->asyncApi && !file->asyncApi->readyFuture->pending && !file->asyncApi->ready) {
         ObjFuture *newResult = newFuture(vm);
         newResult->pending = false;
         newResult->controlled = true;
@@ -392,6 +402,34 @@ static Value isReady(DictuVM *vm, int argCount, Value *args) {
     return OBJ_VAL(file->asyncApi->readyFuture);
 }
 
+static Value close(DictuVM *vm, int argCount, Value *args) {
+    UNUSED(args);
+    if (argCount > 0) {
+        runtimeError(vm, "close() takes no argument, (%d) given.", argCount);
+        return EMPTY_VAL;
+    }
+    ObjFile *file = AS_FILE(args[0]);
+    if (file->asyncApi && file->asyncApi->ready) {
+        file->asyncApi->ready = false;
+        uv_fs_t *close_req = new_fs_request(vm, file);
+        AsyncFsRequest *fr = new_async_fs_request(vm, file, NULL);
+        fr->future->obj.isDark = true;
+        fr->file = NULL;
+        close_req->data = fr;
+        uv_fs_close(vm->uv_loop, close_req, file->asyncApi->fd,
+                    async_close_file_cb);
+        FREE(vm, AsyncFile, file->asyncApi);
+        file->asyncApi = NULL;
+        return OBJ_VAL(fr->future);
+    } 
+    ObjFuture *newResult = newFuture(vm);
+    newResult->pending = false;
+    newResult->controlled = true;
+    newResult->result = newResultSuccess(vm, TRUE_VAL);
+    return OBJ_VAL(newResult);
+    
+}
+
 void declareFileMethods(DictuVM *vm) {
     defineNative(vm, &vm->fileMethods, "write", writeFile);
     defineNative(vm, &vm->fileMethods, "writeLine", writeLineFile);
@@ -399,6 +437,7 @@ void declareFileMethods(DictuVM *vm) {
     defineNative(vm, &vm->fileMethods, "readLine", readLineFile);
     defineNative(vm, &vm->fileMethods, "seek", seekFile);
     defineNative(vm, &vm->fileMethods, "isReady", isReady);
+    defineNative(vm, &vm->fileMethods, "close", close);
 }
 
 void openFile(DictuVM *vm, ObjFile *file) {
