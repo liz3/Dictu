@@ -308,6 +308,10 @@ int disassembleInstruction(Chunk *chunk, int offset) {
             return constantInstruction("OP_CLOSE_FILE", chunk, offset);
         case OP_BREAK:
             return simpleInstruction("OP_BREAK", offset);
+        case OP_AWAIT:
+            return invokeInstruction("OP_AWAIT", chunk, offset);
+        case OP_THROW:
+            return simpleInstruction("OP_THROW", offset);
         default:
             printf("Unknown opcode %d\n", instruction);
             return offset + 1;

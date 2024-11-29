@@ -1047,13 +1047,18 @@ static void setReplVar(DictuVM *vm, Value value) {
 }
 
 static DictuInterpretResult asyncFreezeState(DictuVM *vm,
-                                             AsyncContext *targetContext) {
+                                             AsyncContext *targetContext, uint8_t* ip) {
     Value target = peek(vm, 0);
 
-    AsyncContext *ctx = copyVmState(vm);
-    if (targetContext->result)
-        ctx->result = targetContext->result;
-    ctx->breakFrame = vm->frameCount - 1;
+    AsyncContext *ctx = targetContext;
+    refAsyncContext(ctx, true);
+    ctx->stackSize = (vm->stackTop - vm->stack);
+    memcpy(ctx->stack, vm->stack, sizeof(Value)* ctx->stackSize);
+    ctx->frames[ctx->frameCount-1].ip = ip;
+    ctx->frameCount = vm->frameCount;
+    ctx->frameCapacity = vm->frameCapacity;
+    ctx->openUpvalues = vm->openUpvalues;
+    // ctx->breakFrame = vm->frameCount - 1;
     ObjFuture *future = AS_FUTURE(target);
     Task *t = createTask(vm, true);
     t->waitFor = future;
@@ -2594,12 +2599,13 @@ static DictuInterpretResult runWithBreakFrame(DictuVM *vm, int breakFrame,
                     assert(!future->consumed);
                     future->isAwait = true;
                     future->consumed = true;
-                    return asyncFreezeState(vm, targetContext);
+                    return asyncFreezeState(vm, targetContext, ip);
                 } else {
                     pop(vm);
                     push(vm, future->result);
                 }
             }
+
             DISPATCH();
         }
 
