@@ -65,7 +65,11 @@ if(MSVC)
     set(CMAKE_C_FLAGS_RELEASE "/O2")
 else()
     set(CMAKE_C_FLAGS "-Wall -Wextra -Werror -Wshadow -Wunused-function -Wunused-macros")
-    set(CMAKE_C_FLAGS_DEBUG "-O0 -g -fsanitize=address")
+if(APPLE)
+    # Comment Liz3: AppleClang deprecated sprintf and wants to use snprintf
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-deprecated-declarations")
+endif()
+    set(CMAKE_C_FLAGS_DEBUG "-O0 -g")
     set(CMAKE_C_FLAGS_RELEASE "-O3 -flto")
 endif()
 
