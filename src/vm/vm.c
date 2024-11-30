@@ -2882,6 +2882,7 @@ void el_task_cb(uv_idle_t *handle) {
         uv_close((uv_handle_t *)handle, NULL);
         while (vm->asyncContextCount) {
             vm->asyncContexts[0]->refCount = 0;
+            vm->asyncContexts[0]->ref = NULL;
             releaseAsyncContext(vm, vm->asyncContexts[0]);
         }
         collectGarbage(vm);

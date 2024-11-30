@@ -13,10 +13,7 @@ void freeTaskTimerAbstract(DictuVM *vm, ObjAbstract *abstract) {
     if (timer->timer->handle) {
         uv_close((uv_handle_t *)timer->timer->handle, release_uv_timer);
     }
-    if (timer->timer->context) {
-        releaseAsyncContext(vm, timer->timer->context);
-        timer->timer->context = NULL;
-    }
+
     FREE(vm, TaskTimer, timer->timer);
     FREE(vm, TaskTimerAbstract, abstract->data);
 }
@@ -57,8 +54,11 @@ static Value cancelTimer(DictuVM *vm, int argCount, Value *args) {
         return BOOL_VAL(false);
     uv_timer_stop(tta->timer->handle);
     if (!tta->timer->timeout || tta->timer->runCount == 0) {
-        if(!tta->timer->timeout)
+        if(!tta->timer->timeout){
            refAsyncContext(tta->timer->context, false);
+           if(tta->timer->context->ref)
+             refAsyncContext(tta->timer->context->ref, false);
+        }
         vm->timerAmount--;
         if (tta->timer->handle) {
             uv_close((uv_handle_t *)tta->timer->handle,

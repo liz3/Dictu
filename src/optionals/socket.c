@@ -27,11 +27,17 @@ unsigned long inet_addr_new(const char *cp) {
 #include <sys/socket.h>
 #endif
 
-typedef struct {
+
+typedef struct asyncSocket {
     uv_tcp_t handle;
     Value connection_func;
     bool isServer;
+    bool isCreated;
+    struct asyncSocket* server;
+    int clientCount;
+    struct asyncSocket** clients;
     DictuVM *vm;
+    bool closed;
 } AsyncSocket;
 
 typedef struct {
@@ -55,10 +61,28 @@ ObjAbstract *newSocket(DictuVM *vm, int sock, int socketFamily, int socketType,
 void async_socket_on_close(uv_handle_t* handle) {
     SocketData *d = (SocketData *)handle->data;
     DictuVM *vm = d->asyncSocket->vm;
+    if(d->asyncSocket->server){
+        AsyncSocket* server = d->asyncSocket->server;
+        if(server->clientCount == 1) {
+            FREE_ARRAY(vm, AsyncSocket*, server->clients, 1);
+            server->clients = NULL;
+        } else {
+            bool f = false;
+            for(int i = 0; i < server->clientCount; i++){
+                if(server->clients[i] == d->asyncSocket){
+                    f = true;
+                } else if(f){
+                    server->clients[i-1] = server->clients[i];
+                }
+            }
+            server->clients = SHRINK_ARRAY(vm, server->clients, AsyncSocket*, server->clientCount, server->clientCount-1);
+        }
+        server->clientCount--;
+    }
+    if(d->asyncSocket->isCreated)
+        vm->asyncSockets -= 1;
     // TODO close callback?
-    FREE(vm, AsyncSocket, d->asyncSocket);
-    d->asyncSocket = NULL;
-     vm->asyncSockets -= 1;
+    d->asyncSocket->closed = true;
 }
 
 void async_on_new_connection(uv_stream_t *server, int status) {
@@ -71,15 +95,22 @@ void async_on_new_connection(uv_stream_t *server, int status) {
         newSocket(vm, 0, d->socketFamily, d->socketProtocol, 0,
                       ALLOCATE(vm, AsyncSocket, 1));
     AsyncSocket* newAsyncSocket = ((SocketData*)newSock->data)->asyncSocket;
-     memset(newAsyncSocket, 0, sizeof(AsyncSocket));
+    memset(newAsyncSocket, 0, sizeof(AsyncSocket));
 
     newAsyncSocket->connection_func = NIL_VAL;
     newAsyncSocket->vm = vm;
+    newAsyncSocket->server = d->asyncSocket;
     uv_tcp_t *client = &newAsyncSocket->handle;
     client->data = (SocketData*)newSock->data;
     uv_tcp_init(d->asyncSocket->vm->uv_loop, client);
 
     if (uv_accept(server, (uv_stream_t *)client) == 0) {
+        if(d->asyncSocket->clientCount) {
+            d->asyncSocket->clients = GROW_ARRAY(vm, d->asyncSocket->clients, AsyncSocket*, d->asyncSocket->clientCount, d->asyncSocket->clientCount);
+        } else {
+            d->asyncSocket->clients = ALLOCATE(vm, AsyncSocket*, 1);
+        }
+        d->asyncSocket->clients[d->asyncSocket->clientCount++] = newAsyncSocket;
         ObjList *list = newList(vm);
         push(vm, OBJ_VAL(list));
         push(vm, OBJ_VAL(newSock));
@@ -198,6 +229,8 @@ static Value createAsyncSocket(DictuVM *vm, int argCount, Value *args) {
     memset(d->asyncSocket, 0, sizeof(AsyncSocket));
     d->asyncSocket->connection_func = NIL_VAL;
     d->asyncSocket->vm = vm;
+    d->asyncSocket->isCreated = true;
+    vm->asyncSockets += 1;
 
     int ret =
         uv_tcp_init_ex(vm->uv_loop, &d->asyncSocket->handle, socketFamily);
@@ -235,7 +268,7 @@ static Value bindSocket(DictuVM *vm, int argCount, Value *args) {
     server.sin_addr.s_addr = inet_addr(host);
     server.sin_port = htons(port);
 
-    if (sock->asyncSocket) {
+    if (sock->asyncSocket && !sock->asyncSocket->closed) {
         if (uv_tcp_bind(&sock->asyncSocket->handle,
                         (const struct sockaddr *)&server, 0)) {
             ERROR_RESULT;
@@ -276,7 +309,7 @@ static Value listenSocket(DictuVM *vm, int argCount, Value *args) {
     }
 
     if (sock->asyncSocket) {
-        if (!IS_CLOSURE(args[1])) {
+        if (!IS_CLOSURE(args[1]) || sock->asyncSocket->closed) {
             ERROR_RESULT;
         }
         sock->asyncSocket->isServer = true;
@@ -351,7 +384,7 @@ static Value writeSocket(DictuVM *vm, int argCount, Value *args) {
     ObjString *message = AS_STRING(args[1]);
 
     if(sock->asyncSocket){
-        if(sock->asyncSocket->isServer){
+        if(sock->asyncSocket->isServer || sock->asyncSocket->closed){
             ERROR_RESULT;
         }
         uv_write_t* req = ALLOCATE(vm, uv_write_t, 1);
@@ -362,7 +395,13 @@ static Value writeSocket(DictuVM *vm, int argCount, Value *args) {
         payload->socket = sock;
         req->data = payload;
         ft->controlled = true;
-        uv_write(req, (uv_stream_t*)&sock->asyncSocket->handle, &write_buf, 1, async_socket_on_write);
+        int r = uv_write(req, (uv_stream_t*)&sock->asyncSocket->handle, &write_buf, 1, async_socket_on_write);
+        if(r){
+            FREE(vm, uv_write_t, req);
+            FREE(vm, AsyncWritePayload, payload);
+            ft->pending = false;
+            ft->result = newResultError(vm, (char*)uv_strerror(r));
+        }
         return OBJ_VAL(ft);
     }
 
@@ -394,6 +433,10 @@ static Value recvSocket(DictuVM *vm, int argCount, Value *args) {
     if(sock->asyncSocket){
         if(sock->asyncSocket->isServer) {
             runtimeError(vm, "recv() called on a server");
+            return EMPTY_VAL;
+        }
+        if(sock->asyncSocket->closed) {
+            runtimeError(vm, "recv() called on closed socket");
             return EMPTY_VAL;
         }
         sock->asyncSocket->connection_func = args[1];
@@ -452,7 +495,7 @@ static Value connectSocket(DictuVM *vm, int argCount, Value *args) {
     server.sin_port = htons(AS_NUMBER(args[2]));
 
     if(sock->asyncSocket) {
-        if(sock->asyncSocket->isServer){
+        if(sock->asyncSocket->isServer || sock->asyncSocket->closed){
             ERROR_RESULT;
         }
         uv_connect_t* connect_req = ALLOCATE(vm, uv_connect_t, 1);
@@ -479,7 +522,26 @@ static Value closeSocket(DictuVM *vm, int argCount, Value *args) {
     }
 
     SocketData *sock = AS_SOCKET(args[0]);
-    close(sock->socket);
+
+    if(sock->asyncSocket){
+        if(sock->asyncSocket->isServer){
+            for(int i = 0; i < sock->asyncSocket->clientCount; i++){
+                sock->asyncSocket->clients[i]->server = NULL;
+                uv_close((uv_handle_t*)&sock->asyncSocket->clients[i]->handle, async_socket_on_close);
+            }
+            FREE_ARRAY(vm, AsyncSocket*, sock->asyncSocket->clients, sock->asyncSocket->clientCount);
+            sock->asyncSocket->clients = NULL;
+            sock->asyncSocket->clientCount = 0;
+
+            // uv_shutdown_t* req = ALLOCATE(vm, uv_shutdown_t, 1);
+            // req->data = sock;
+            uv_close( (uv_handle_t *)&sock->asyncSocket->handle, async_socket_on_close);
+        } else {
+             uv_close((uv_handle_t *)&sock->asyncSocket->handle, async_socket_on_close);
+        }
+    } else {
+        close(sock->socket);
+    }
 
     return NIL_VAL;
 }
@@ -508,6 +570,9 @@ static Value setSocketOpt(DictuVM *vm, int argCount, Value *args) {
 }
 
 void freeSocket(DictuVM *vm, ObjAbstract *abstract) {
+    SocketData* data = (SocketData*)abstract->data;
+    if(data->asyncSocket)
+        FREE(vm, AsyncSocket, data->asyncSocket);
     FREE(vm, SocketData, abstract->data);
 }
 
@@ -529,9 +594,7 @@ ObjAbstract *newSocket(DictuVM *vm, int sock, int socketFamily, int socketType,
     socket->socketFamily = socketFamily;
     socket->socketType = socketType;
     socket->socketProtocol = socketProtocol;
-    socket->asyncSocket = asyncSocket;
-    if(asyncSocket)
-         vm->asyncSockets += 1;
+    socket->asyncSocket = asyncSocket; 
 
     abstract->data = socket;
 
