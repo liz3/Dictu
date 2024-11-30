@@ -158,6 +158,7 @@ int file_modes_from_str(char *str) {
         return UV_FS_O_RDWR | UV_FS_O_APPEND | UV_FS_O_CREAT;
 
     assert(false);
+    return -1;
 }
 
 static Value writeFile(DictuVM *vm, int argCount, Value *args) {
@@ -449,9 +450,15 @@ void openFile(DictuVM *vm, ObjFile *file) {
         file->asyncApi->readyFuture = readyFuture;
         uv_fs_t *open_req = new_fs_request(vm, file);
         open_req->data = new_async_fs_request(vm, file, readyFuture);
+#ifdef _WIN32
+        uv_fs_open(vm->uv_loop, open_req, file->path,
+                   file_modes_from_str(file->openType),
+                   0, async_on_open);
+#else
         uv_fs_open(vm->uv_loop, open_req, file->path,
                    file_modes_from_str(file->openType),
                    S_IRUSR | S_IWUSR | S_IRGRP, async_on_open);
+#endif
     } else {
         file->file = fopen(file->path, file->openType);
 

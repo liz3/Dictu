@@ -3,12 +3,42 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <windows.h>
+#include <synchapi.h>
+#else
 #include <sys/time.h>
 #include <time.h>
+#endif
 #include <uv.h>
 
 #include "memory.h"
 #include "vm.h"
+
+// https://stackoverflow.com/a/26085827
+#ifdef _WIN32
+
+int gettimeofday(struct timeval * tp, struct timezone * tzp)
+{
+    // Note: some broken versions only have 8 trailing zero's, the correct epoch has 9 trailing zero's
+    // This magic number is the number of 100 nanosecond intervals since January 1, 1601 (UTC)
+    // until 00:00:00 January 1, 1970 
+    static const uint64_t EPOCH = ((uint64_t) 116444736000000000ULL);
+
+    SYSTEMTIME  system_time;
+    FILETIME    file_time;
+    uint64_t    time;
+
+    GetSystemTime( &system_time );
+    SystemTimeToFileTime( &system_time, &file_time );
+    time =  ((uint64_t)file_time.dwLowDateTime )      ;
+    time += ((uint64_t)file_time.dwHighDateTime) << 32;
+
+    tp->tv_sec  = (long) ((time - EPOCH) / 10000000L);
+    tp->tv_usec = (long) (system_time.wMilliseconds * 1000);
+    return 0;
+}
+#endif
 
 char *readFile(DictuVM *vm, const char *path) {
     FILE *file = fopen(path, "rb");
@@ -162,6 +192,10 @@ uint64_t getTimeMs() {
     return millisecondsSinceEpoch;
 }
 int msleep(uint32_t msec){
+#ifdef _WIN32
+    Sleep(msec);
+    return 0;
+#else
     struct timespec ts;
     int res;
 
@@ -169,6 +203,7 @@ int msleep(uint32_t msec){
     ts.tv_nsec = (msec % 1000) * 1000000;
     res = nanosleep(&ts, &ts);
     return res;
+#endif
 }
 DictuVM* vmFromUvHandle(const uv_handle_t *handle) {
     uv_loop_t* loop = uv_handle_get_loop(handle);
