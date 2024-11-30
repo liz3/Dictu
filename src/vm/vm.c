@@ -231,6 +231,7 @@ DictuVM *dictuInitVM(bool repl, int argc, char **argv) {
     vm->tasks = NULL;
     vm->taskCount = 0;
     vm->timerAmount = 0;
+    vm->asyncSockets = 0;
     vm->argc = argc;
     vm->argv = argv;
     initTable(&vm->modules);
@@ -2876,7 +2877,7 @@ DictuInterpretResult run_task(DictuVM *vm, Task *t) {
 
 void el_task_cb(uv_idle_t *handle) {
     DictuVM *vm = vmFromUvHandle((uv_handle_t *)handle);
-    if (vm->timerAmount == 0 && vm->taskCount == 0) {
+    if (vm->timerAmount == 0 && vm->taskCount == 0 && vm->asyncSockets == 0) {
         uv_idle_stop(handle);
         uv_close((uv_handle_t *)handle, NULL);
         while (vm->asyncContextCount) {

@@ -57,6 +57,7 @@ struct _vm {
     int frameCount;
     int frameCapacity;
     int timerAmount;
+    int asyncSockets;
     ObjModule *lastModule;
     Table modules;
     Table globals;

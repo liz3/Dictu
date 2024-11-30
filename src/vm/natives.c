@@ -1,11 +1,58 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+#include <uv.h>
 
+#include "common.h"
 #include "memory.h"
 #include "natives.h"
+#include "object.h"
+#include "util.h"
+#include "value.h"
 #include "vm.h"
 #include "../optionals/optionals.h"
+
+typedef struct {
+    ObjFuture* future;
+    char* buffer;
+    int bufferLen;
+    DictuVM* vm;
+} AsyncInputPayload;
+
+// Callback to allocate memory for the incoming data
+void async_input_alloc_buffer(uv_handle_t *handle, size_t suggested_size, uv_buf_t *buf) {
+    UNUSED(handle);
+    buf->base = (char *)malloc(suggested_size);
+    buf->len = suggested_size;
+}
+
+void async_input_close(uv_handle_t* e){
+    FREE(vmFromUvHandle(e), uv_pipe_t, e);
+}
+// Callback to handle incoming data from stdin
+void async_input_read_stdin(uv_stream_t *stream, ssize_t nread, const uv_buf_t *buf) {
+    AsyncInputPayload* p = stream->data;
+    DictuVM* vm = p->vm;
+    if (nread > 0) {
+        p->buffer = p->buffer ? GROW_ARRAY(vm, p->buffer, char, p->bufferLen, p->bufferLen + nread) : ALLOCATE(vm, char, nread);
+        memcpy(p->buffer + p->bufferLen, buf->base, nread);
+        p->bufferLen += nread;
+        if(p->buffer[p->bufferLen-1] == '\n'){
+         ObjFuture* ft = p->future;
+         ft->pending = false;
+         ObjString* str = copyString(vm, p->buffer, p->bufferLen-1);
+         ft->result = newResultSuccess(vm, OBJ_VAL(str));
+         FREE_ARRAY(vm, char, p->buffer, p->bufferLen);
+         FREE(vm, AsyncInputPayload, p);
+         uv_close((uv_handle_t *)stream, async_input_close);
+     }
+ }
+    // Free the memory allocated for the buffer
+ if (buf->base) {
+    free(buf->base);
+}
+}
 
 // Native functions
 static Value typeNative(DictuVM *vm, int argCount, Value *args) {
@@ -80,6 +127,38 @@ static Value inputNative(DictuVM *vm, int argCount, Value *args) {
     line[length] = '\0';
 
     return OBJ_VAL(takeString(vm, line, length));
+}
+
+static Value asyncInputNative(DictuVM *vm, int argCount, Value *args) {
+    if (argCount > 1) {
+        runtimeError(vm, "input() takes either 0 or 1 arguments (%d given)", argCount);
+        return EMPTY_VAL;
+    }
+
+    if (argCount != 0) {
+        Value prompt = args[0];
+        if (!IS_STRING(prompt)) {
+            runtimeError(vm, "input() only takes a string argument");
+            return EMPTY_VAL;
+        }
+
+        printf("%s", AS_CSTRING(prompt));
+        fflush(stdout);
+    }
+
+    uv_pipe_t* stdin_pipe = ALLOCATE(vm, uv_pipe_t, 1);
+    uv_pipe_init(vm->uv_loop, stdin_pipe, 0);
+    uv_pipe_open(stdin_pipe, STDIN_FILENO);
+    ObjFuture* ft = newFuture(vm);
+    AsyncInputPayload* pl = ALLOCATE(vm, AsyncInputPayload, 1);
+    pl->future = ft;
+    pl->vm =vm;
+    pl->bufferLen = 0;
+    pl->buffer = NULL;
+    ft->controlled = true;
+    stdin_pipe->data = pl;
+    uv_read_start((uv_stream_t *)stdin_pipe, async_input_alloc_buffer, async_input_read_stdin);
+    return OBJ_VAL(ft);
 }
 
 static Value printNative(DictuVM *vm, int argCount, Value *args) {
@@ -185,6 +264,7 @@ static Value generateErrorResult(DictuVM *vm, int argCount, Value *args) {
 void defineAllNatives(DictuVM *vm) {
     char *nativeNames[] = {
             "input",
+            "asyncInput",
             "type",
             "set",
             "print",
@@ -197,6 +277,7 @@ void defineAllNatives(DictuVM *vm) {
 
     NativeFn nativeFunctions[] = {
             inputNative,
+            asyncInputNative,
             typeNative,
             setNative,
             printNative,
