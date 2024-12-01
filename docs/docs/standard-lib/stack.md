@@ -5,7 +5,7 @@ nav_order: 23
 parent: Standard Library
 ---
 
-# UUID
+# Stack
 {: .no_toc }
 
 ## Table of contents

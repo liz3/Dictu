@@ -119,7 +119,7 @@ Returns an uppercase version of the given string.
 "DICTU".upper(); // DICTU
 ```
 
-### string.toNumber() -> Number
+### string.toNumber() -> Result\<Number>
 
 Casts a string to a number. This method returns a Result type and will unwrap to a number.
 
