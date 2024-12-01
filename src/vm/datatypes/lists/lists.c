@@ -345,32 +345,23 @@ static int partitionStringList(ObjList *arr, int start, int end) {
 
 
 static int partitionNumberList(ObjList *arr, int start, int end) {
-    int pivot_index = (int) floor(start + end) / 2;
 
-    double pivot = AS_NUMBER(arr->values.values[pivot_index]);
+    double pivot = AS_NUMBER(arr->values.values[end]);
 
     int i = start - 1;
-    int j = end + 1;
-
-    for (;;) {
-        do {
-            i = i + 1;
-        } while (AS_NUMBER(arr->values.values[i]) < pivot);
-
-        do {
-            j = j - 1;
-        } while (AS_NUMBER(arr->values.values[j]) > pivot);
-
-        if (i >= j) {
-            return j;
+    for(int t = start; t <=end-1; t++){
+        double value = AS_NUMBER(arr->values.values[t]);
+        if(value < pivot){
+            i++;
+            Value temp = arr->values.values[i];
+            arr->values.values[i] = arr->values.values[t];
+            arr->values.values[t] = temp;
         }
-
-        // Swap arr[i] with arr[j]
-        Value temp = arr->values.values[i];
-
-        arr->values.values[i] = arr->values.values[j];
-        arr->values.values[j] = temp;
     }
+    Value temp = arr->values.values[i+1];
+    arr->values.values[i+1] = arr->values.values[end];
+    arr->values.values[end] = temp;
+    return i + 1;
 }
 
 // Implementation of Quick Sort using the Hoare
@@ -378,19 +369,10 @@ static int partitionNumberList(ObjList *arr, int start, int end) {
 // Best Case O(n log n)
 // Worst Case O(n^2) (If the list is already sorted.) 
 static void quickSort(ObjList *arr, int start, int end, int (*partition)(ObjList *, int, int)) {
-    while (start < end) {
+    if (start < end) {
         int part = partition(arr, start, end);
-
-        // Recurse for the smaller halve.
-        if (part - start < end - part) {
-            quickSort(arr, start, part, partition);
-
-            start = start + 1;
-        } else {
-            quickSort(arr, part + 1, end, partition);
-
-            end = end - 1;
-        }
+        quickSort(arr, start, part-1, partition);
+        quickSort(arr, part + 1, end, partition);
     }
 }
 
