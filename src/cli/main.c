@@ -93,7 +93,11 @@ char *getDictuPath() {
     if ((tmp = getenv("DICTU_PATH")) != NULL) {
         strncat(dictuPath, tmp, strlen(tmp));
     } else {
+        #ifdef _WIN32
+        const char *home = getenv("USERPROFILE");
+        #else
         const char *home = getenv("HOME");
+        #endif
         strncpy(dictuPath, home, strlen(home));
         strncat(dictuPath, DICTU_HOME, strlen(DICTU_HOME));
     }

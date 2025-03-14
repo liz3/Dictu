@@ -1,6 +1,5 @@
 #include "socket.h"
 
-#include <netinet/in.h>
 #include <stdio.h>
 #include <uv.h>
 
@@ -23,6 +22,7 @@ unsigned long inet_addr_new(const char *cp) {
 #define write(fd, buffer, count) _write(fd, buffer, count)
 #define close(fd) closesocket(fd)
 #else
+#include <netinet/in.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #endif
