@@ -11,7 +11,7 @@ extern "C" {
 
 // This is used ti determine if we can safely load the function pointers without
 // UB.
-#define FFI_MOD_API_VERSION 4
+#define FFI_MOD_API_VERSION 5
 
 #define UNUSED(__x__) (void)__x__
 
@@ -307,47 +307,48 @@ typedef struct {
     Value *slots;
 } CallFrame;
 
-typedef struct {
-    int interval;
-    uint64_t next;
-    bool repeating;
-    bool cancelled;
-} TaskTimer;
-
 typedef struct asyncContext {
-     CallFrame *frames;
-     int frameCount;
-     int frameCapacity;
-     ObjFuture* result;
-     int breakFrame;
-     Value stack[STACK_MAX];
-     int stackSize;
-     ObjUpvalue *openUpvalues;
-     struct asyncContext* ref;
-     int refs;
-     TaskTimer* timer;
+    CallFrame *frames;
+    int frameCount;
+    int frameCapacity;
+    ObjFuture *result;
+    int breakFrame;
+    Value stack[STACK_MAX];
+    int stackSize;
+    ObjUpvalue *openUpvalues;
+    struct asyncContext *ref;
+    int refCount;
 } AsyncContext;
 
+typedef struct {
+    uv_timer_t *handle;
+    AsyncContext *context;
+    bool timeout;
+    int runCount;
+} TaskTimer;
 
 typedef struct {
     CallFrame *frame;
-    ObjFuture* waitFor;
-    AsyncContext* asyncContext;
+    ObjFuture *waitFor;
+    AsyncContext *asyncContext;
 } Task;
 
 struct _vm {
-    void *compilerStub;
-    Value* stack;
+    void* compilerStub;
+    void *uvLoopStub;
+    Value *stack;
     Value *stackTop;
     bool repl;
     CallFrame *frames;
-    AsyncContext* asyncContextInScope;
-    AsyncContext** asyncContexts;
-    Task** tasks;
+    AsyncContext *asyncContextInScope;
+    AsyncContext **asyncContexts;
+    Task **tasks;
     int taskCount;
     int asyncContextCount;
     int frameCount;
     int frameCapacity;
+    int timerAmount;
+    int asyncSockets;
     ObjModule *lastModule;
     Table modules;
     Table globals;
