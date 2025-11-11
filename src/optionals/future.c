@@ -11,6 +11,7 @@ typedef struct {
 void freeTaskTimerAbstract(DictuVM *vm, ObjAbstract *abstract) {
     TaskTimerAbstract *timer = (TaskTimerAbstract *)abstract->data;
     if (timer->timer->handle) {
+        if(!uv_is_closing((uv_handle_t *)timer->timer->handle))
         uv_close((uv_handle_t *)timer->timer->handle, release_uv_timer);
     }
 
