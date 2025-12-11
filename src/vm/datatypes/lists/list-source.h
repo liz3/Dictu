@@ -16,7 +16,7 @@
 "\n" \
 "def sortFunc(list, func) {\n" \
 "    if(list.len() < 2) {\n" \
-"        return;\n" \
+"        return list;\n" \
 "    }\n" \
 "    const partition = def (arr, start, end) => {\n" \
 "        const pivot = arr[end];\n" \
@@ -42,6 +42,7 @@
 "        }\n" \
 "    };\n" \
 "    quickSort(list, 0, list.len()-1);\n" \
+"    return list;\n" \
 "}\n" \
 "\n" \
 "def filter(list, func=def(x) => x) {\n" \

@@ -16,7 +16,7 @@ def map(list, func) {
 
 def sortFunc(list, func) {
     if(list.len() < 2) {
-        return;
+        return list;
     }
     const partition = def (arr, start, end) => {
         const pivot = arr[end];
@@ -42,6 +42,7 @@ def sortFunc(list, func) {
         }
     };
     quickSort(list, 0, list.len()-1);
+    return list;
 }
 
 def filter(list, func=def(x) => x) {
