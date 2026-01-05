@@ -267,7 +267,7 @@ static LangTokenType identifierType(Scanner *scanner) {
                         return checkKeyword(scanner, 2, 4, "atic", TOKEN_STATIC);
                     case 'u':
                         return checkKeyword(scanner, 2, 3, "per", TOKEN_SUPER);
-		    case 'w':
+		            case 'w':
                         return checkKeyword(scanner, 2, 4, "itch", TOKEN_SWITCH);
                 }
             }
@@ -284,6 +284,7 @@ static LangTokenType identifierType(Scanner *scanner) {
                                     return checkKeyword(scanner, 3, 2, "ow", TOKEN_THROW);
                             }
                         }
+                        break;
                     case 'r':
                         if (scanner->current - scanner->start > 2) {
                             switch (scanner->start[2]) {
@@ -292,6 +293,7 @@ static LangTokenType identifierType(Scanner *scanner) {
                                 case 'a':
                                     return checkKeyword(scanner, 3, 2, "it", TOKEN_TRAIT);
                             }
+
                         }
                     break;
                 }
