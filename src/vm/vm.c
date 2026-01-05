@@ -109,7 +109,15 @@ AsyncContext *createAsyncContext(DictuVM *vm) {
                        vm->asyncContextCount, vm->asyncContextCount + 1);
     }
     AsyncContext *ctx = ALLOCATE(vm, AsyncContext, 1);
-    memset(ctx, 0, sizeof(AsyncContext));
+    ctx->frames = NULL;
+    ctx->frameCount = 0;
+    ctx->frameCapacity = 0;
+    ctx->result = NULL;
+    ctx->breakFrame = -1;
+    ctx->stackSize = 0;
+    ctx->openUpvalues = NULL;
+    ctx->ref = NULL;
+    ctx->refCount = 0;
     vm->asyncContexts[vm->asyncContextCount++] = ctx;
     return ctx;
 }
