@@ -2,15 +2,16 @@
 
 #include "common.h"
 #include "compiler.h"
-#include "memory.h"
 #include "datatypes/files.h"
+#include "linked_list.h"
+#include "memory.h"
 #include "object.h"
 #include "value.h"
 #include "vm.h"
 
 #ifdef DEBUG_TRACE_GC
-#include <stdio.h>
 #include "debug.h"
+#include <stdio.h>
 #endif
 
 #define GC_HEAP_GROW_FACTOR 2
@@ -19,9 +20,10 @@ void *reallocate(DictuVM *vm, void *previous, size_t oldSize, size_t newSize) {
     vm->bytesAllocated += newSize - oldSize;
 
 #ifdef DEBUG_TRACE_MEM
-    printf("Total bytes allocated: %zu\nNew allocation: %zu\nOld allocation: %zu\n\n", vm->bytesAllocated, newSize, oldSize);
+    printf("Total bytes allocated: %zu\nNew allocation: %zu\nOld allocation: "
+           "%zu\n\n",
+           vm->bytesAllocated, newSize, oldSize);
 #endif
-
 
     if (newSize == 0) {
         free(previous);
@@ -32,10 +34,12 @@ void *reallocate(DictuVM *vm, void *previous, size_t oldSize, size_t newSize) {
 }
 
 void grayObject(DictuVM *vm, Obj *object) {
-    if (object == NULL) return;
+    if (object == NULL)
+        return;
 
     // Don't get caught in cycle.
-    if (object->isDark) return;
+    if (object->isDark)
+        return;
 
 #ifdef DEBUG_TRACE_GC
     printf("%p gray ", (void *)object);
@@ -50,15 +54,16 @@ void grayObject(DictuVM *vm, Obj *object) {
 
         // Not using reallocate() here because we don't want to trigger the
         // GC inside a GC!
-        vm->grayStack = realloc(vm->grayStack,
-                               sizeof(Obj *) * vm->grayCapacity);
+        vm->grayStack =
+            realloc(vm->grayStack, sizeof(Obj *) * vm->grayCapacity);
     }
 
     vm->grayStack[vm->grayCount++] = object;
 }
 
 void grayValue(DictuVM *vm, Value value) {
-    if (!IS_OBJ(value)) return;
+    if (!IS_OBJ(value))
+        return;
     grayObject(vm, AS_OBJ(value));
 }
 
@@ -76,250 +81,254 @@ static void blackenObject(DictuVM *vm, Obj *object) {
 #endif
 
     switch (object->type) {
-        case OBJ_MODULE: {
-            ObjModule *module = (ObjModule *) object;
-            grayObject(vm, (Obj *) module->name);
-            grayObject(vm, (Obj *) module->path);
-            grayTable(vm, &module->values);
-            break;
+    case OBJ_MODULE: {
+        ObjModule *module = (ObjModule *)object;
+        grayObject(vm, (Obj *)module->name);
+        grayObject(vm, (Obj *)module->path);
+        grayTable(vm, &module->values);
+        break;
+    }
+
+    case OBJ_BOUND_METHOD: {
+        ObjBoundMethod *bound = (ObjBoundMethod *)object;
+        grayValue(vm, bound->receiver);
+        grayObject(vm, (Obj *)bound->method);
+        break;
+    }
+
+    case OBJ_CLASS: {
+        ObjClass *klass = (ObjClass *)object;
+        grayObject(vm, (Obj *)klass->name);
+        grayObject(vm, (Obj *)klass->superclass);
+        grayObject(vm, (Obj *)klass->classAnnotations);
+        grayObject(vm, (Obj *)klass->methodAnnotations);
+        grayObject(vm, (Obj *)klass->fieldAnnotations);
+        grayTable(vm, &klass->publicMethods);
+        grayTable(vm, &klass->privateMethods);
+        grayTable(vm, &klass->abstractMethods);
+        grayTable(vm, &klass->variables);
+        grayTable(vm, &klass->constants);
+        break;
+    }
+
+    case OBJ_ENUM: {
+        ObjEnum *enumObj = (ObjEnum *)object;
+        grayObject(vm, (Obj *)enumObj->name);
+        grayTable(vm, &enumObj->values);
+        break;
+    }
+
+    case OBJ_CLOSURE: {
+        ObjClosure *closure = (ObjClosure *)object;
+        grayObject(vm, (Obj *)closure->function);
+        for (int i = 0; i < closure->upvalueCount; i++) {
+            grayObject(vm, (Obj *)closure->upvalues[i]);
         }
+        break;
+    }
 
-        case OBJ_BOUND_METHOD: {
-            ObjBoundMethod *bound = (ObjBoundMethod *) object;
-            grayValue(vm, bound->receiver);
-            grayObject(vm, (Obj *) bound->method);
-            break;
+    case OBJ_FUNCTION: {
+        ObjFunction *function = (ObjFunction *)object;
+        grayObject(vm, (Obj *)function->name);
+        grayArray(vm, &function->chunk.constants);
+        break;
+    }
+
+    case OBJ_INSTANCE: {
+        ObjInstance *instance = (ObjInstance *)object;
+        grayObject(vm, (Obj *)instance->klass);
+        grayTable(vm, &instance->publicAttributes);
+        grayTable(vm, &instance->privateAttributes);
+        break;
+    }
+
+    case OBJ_UPVALUE:
+        grayValue(vm, ((ObjUpvalue *)object)->closed);
+        break;
+
+    case OBJ_LIST: {
+        ObjList *list = (ObjList *)object;
+        grayArray(vm, &list->values);
+        break;
+    }
+
+    case OBJ_DICT: {
+        ObjDict *dict = (ObjDict *)object;
+        grayDict(vm, dict);
+        break;
+    }
+
+    case OBJ_SET: {
+        ObjSet *set = (ObjSet *)object;
+        graySet(vm, set);
+        break;
+    }
+
+    case OBJ_ABSTRACT: {
+        ObjAbstract *abstract = (ObjAbstract *)object;
+        grayTable(vm, &abstract->values);
+        if (abstract->grayFunc != NULL) {
+            abstract->grayFunc(vm, abstract);
         }
+        break;
+    }
 
-        case OBJ_CLASS: {
-            ObjClass *klass = (ObjClass *) object;
-            grayObject(vm, (Obj *) klass->name);
-            grayObject(vm, (Obj *) klass->superclass);
-            grayObject(vm, (Obj *) klass->classAnnotations);
-            grayObject(vm, (Obj *) klass->methodAnnotations);
-            grayObject(vm, (Obj *) klass->fieldAnnotations);
-            grayTable(vm, &klass->publicMethods);
-            grayTable(vm, &klass->privateMethods);
-            grayTable(vm, &klass->abstractMethods);
-            grayTable(vm, &klass->variables);
-            grayTable(vm, &klass->constants);
-            break;
-        }
+    case OBJ_RESULT: {
+        ObjResult *result = (ObjResult *)object;
+        grayValue(vm, result->value);
+        break;
+    }
 
-        case OBJ_ENUM: {
-            ObjEnum *enumObj = (ObjEnum *) object;
-            grayObject(vm, (Obj *) enumObj->name);
-            grayTable(vm, &enumObj->values);
-            break;
-        }
-
-        case OBJ_CLOSURE: {
-            ObjClosure *closure = (ObjClosure *) object;
-            grayObject(vm, (Obj *) closure->function);
-            for (int i = 0; i < closure->upvalueCount; i++) {
-                grayObject(vm, (Obj *) closure->upvalues[i]);
-            }
-            break;
-        }
-
-        case OBJ_FUNCTION: {
-            ObjFunction *function = (ObjFunction *) object;
-            grayObject(vm, (Obj *) function->name);
-            grayArray(vm, &function->chunk.constants);
-            break;
-        }
-
-        case OBJ_INSTANCE: {
-            ObjInstance *instance = (ObjInstance *) object;
-            grayObject(vm, (Obj *) instance->klass);
-            grayTable(vm, &instance->publicAttributes);
-            grayTable(vm, &instance->privateAttributes);
-            break;
-        }
-
-        case OBJ_UPVALUE:
-            grayValue(vm, ((ObjUpvalue *) object)->closed);
-            break;
-
-        case OBJ_LIST: {
-            ObjList *list = (ObjList *) object;
-            grayArray(vm, &list->values);
-            break;
-        }
-
-        case OBJ_DICT: {
-            ObjDict *dict = (ObjDict *) object;
-            grayDict(vm, dict);
-            break;
-        }
-
-        case OBJ_SET: {
-            ObjSet *set = (ObjSet *) object;
-            graySet(vm, set);
-            break;
-        }
-
-        case OBJ_ABSTRACT: {
-            ObjAbstract *abstract = (ObjAbstract *) object;
-            grayTable(vm, &abstract->values);
-            if (abstract->grayFunc != NULL) {
-                abstract->grayFunc(vm, abstract);
-            }
-            break;
-        }
-
-        case OBJ_RESULT: {
-            ObjResult *result = (ObjResult *) object;
-            grayValue(vm, result->value);
-            break;
-        }
-
-        case OBJ_NATIVE:
-        case OBJ_STRING:
-        case OBJ_FILE:
-        case OBJ_FUTURE:
-            break;
+    case OBJ_NATIVE:
+    case OBJ_STRING:
+    case OBJ_FILE:
+    case OBJ_FUTURE:
+        break;
     }
 }
 
 void freeObject(DictuVM *vm, Obj *object) {
 #ifdef DEBUG_TRACE_GC
-    printf("%p free type %d\n", (void*)object, object->type);
+    printf("%p free type %d\n", (void *)object, object->type);
 #endif
 
     switch (object->type) {
-        case OBJ_MODULE: {
-            ObjModule *module = (ObjModule *) object;
-            freeTable(vm, &module->values);
-            FREE(vm, ObjModule, object);
-            break;
-        }
+    case OBJ_MODULE: {
+        ObjModule *module = (ObjModule *)object;
+        freeTable(vm, &module->values);
+        FREE(vm, ObjModule, object);
+        break;
+    }
 
-        case OBJ_BOUND_METHOD: {
-            FREE(vm, ObjBoundMethod, object);
-            break;
-        }
+    case OBJ_BOUND_METHOD: {
+        FREE(vm, ObjBoundMethod, object);
+        break;
+    }
 
-        case OBJ_CLASS: {
-            ObjClass *klass = (ObjClass *) object;
-            freeTable(vm, &klass->publicMethods);
-            freeTable(vm, &klass->privateMethods);
-            freeTable(vm, &klass->abstractMethods);
-            freeTable(vm, &klass->variables);
-            freeTable(vm, &klass->constants);
-            FREE(vm, ObjClass, object);
-            break;
-        }
+    case OBJ_CLASS: {
+        ObjClass *klass = (ObjClass *)object;
+        freeTable(vm, &klass->publicMethods);
+        freeTable(vm, &klass->privateMethods);
+        freeTable(vm, &klass->abstractMethods);
+        freeTable(vm, &klass->variables);
+        freeTable(vm, &klass->constants);
+        FREE(vm, ObjClass, object);
+        break;
+    }
 
-        case OBJ_ENUM: {
-            ObjEnum *enumObj = (ObjEnum *) object;
-            freeTable(vm, &enumObj->values);
-            FREE(vm, ObjEnum, object);
-            break;
-        }
+    case OBJ_ENUM: {
+        ObjEnum *enumObj = (ObjEnum *)object;
+        freeTable(vm, &enumObj->values);
+        FREE(vm, ObjEnum, object);
+        break;
+    }
 
-        case OBJ_CLOSURE: {
-            ObjClosure *closure = (ObjClosure *) object;
-            FREE_ARRAY(vm, ObjUpvalue*, closure->upvalues, closure->upvalueCount);
-            FREE(vm, ObjClosure, object);
-            break;
-        }
+    case OBJ_CLOSURE: {
+        ObjClosure *closure = (ObjClosure *)object;
+        FREE_ARRAY(vm, ObjUpvalue *, closure->upvalues, closure->upvalueCount);
+        FREE(vm, ObjClosure, object);
+        break;
+    }
 
-        case OBJ_FUNCTION: {
-            ObjFunction *function = (ObjFunction *) object;
-            if (function->type == TYPE_INITIALIZER) {
-                if (function->privatePropertyCount > 0) {
-                    FREE_ARRAY(vm, int, function->privatePropertyNames, function->privatePropertyCount);
-                    FREE_ARRAY(vm, int, function->privatePropertyIndexes, function->privatePropertyCount);
-                }
-                if (function->propertyCount > 0) {
-                    FREE_ARRAY(vm, int, function->propertyNames, function->propertyCount);
-                    FREE_ARRAY(vm, int, function->propertyIndexes, function->propertyCount);
-                }
+    case OBJ_FUNCTION: {
+        ObjFunction *function = (ObjFunction *)object;
+        if (function->type == TYPE_INITIALIZER) {
+            if (function->privatePropertyCount > 0) {
+                FREE_ARRAY(vm, int, function->privatePropertyNames,
+                           function->privatePropertyCount);
+                FREE_ARRAY(vm, int, function->privatePropertyIndexes,
+                           function->privatePropertyCount);
             }
-            freeChunk(vm, &function->chunk);
-            FREE(vm, ObjFunction, object);
-            break;
-        }
-
-        case OBJ_INSTANCE: {
-            ObjInstance *instance = (ObjInstance *) object;
-            freeTable(vm, &instance->publicAttributes);
-            freeTable(vm, &instance->privateAttributes);
-            FREE(vm, ObjInstance, object);
-            break;
-        }
-
-        case OBJ_NATIVE: {
-            FREE(vm, ObjNative, object);
-            break;
-        }
-
-        case OBJ_STRING: {
-            ObjString *string = (ObjString *) object;
-            FREE_ARRAY(vm, char, string->chars, string->length + 1);
-            FREE(vm, ObjString, object);
-            break;
-        }
-
-        case OBJ_LIST: {
-            ObjList *list = (ObjList *) object;
-            freeValueArray(vm, &list->values);
-            FREE(vm, ObjList, list);
-            break;
-        }
-
-        case OBJ_DICT: {
-            ObjDict *dict = (ObjDict *) object;
-            FREE_ARRAY(vm, DictItem, dict->entries, dict->capacityMask + 1);
-            FREE(vm, ObjDict, dict);
-            break;
-        }
-
-        case OBJ_SET: {
-            ObjSet *set = (ObjSet *) object;
-            FREE_ARRAY(vm, SetItem, set->entries, set->capacityMask + 1);
-            FREE(vm, ObjSet, set);
-            break;
-        }
-
-        case OBJ_FILE: {
-            ObjFile* file = (ObjFile*) object;
-            if(file->asyncApi) {
-                // see files.c:gc_async_close_file
-                async_maybe_close_file(vm, file);
-                break;
+            if (function->propertyCount > 0) {
+                FREE_ARRAY(vm, int, function->propertyNames,
+                           function->propertyCount);
+                FREE_ARRAY(vm, int, function->propertyIndexes,
+                           function->propertyCount);
             }
-            FREE(vm, ObjFile, object);
-            break;
         }
-        case OBJ_FUTURE: {
-            FREE(vm, ObjFuture, object);
-            break;
-        }
+        freeChunk(vm, &function->chunk);
+        FREE(vm, ObjFunction, object);
+        break;
+    }
 
-        case OBJ_UPVALUE: {
-            FREE(vm, ObjUpvalue, object);
-            break;
-        }
+    case OBJ_INSTANCE: {
+        ObjInstance *instance = (ObjInstance *)object;
+        freeTable(vm, &instance->publicAttributes);
+        freeTable(vm, &instance->privateAttributes);
+        FREE(vm, ObjInstance, object);
+        break;
+    }
 
-        case OBJ_ABSTRACT: {
-            ObjAbstract *abstract = (ObjAbstract*) object;
-            abstract->func(vm, abstract);
-            freeTable(vm, &abstract->values);
-            FREE(vm, ObjAbstract, object);
-            break;
-        }
+    case OBJ_NATIVE: {
+        FREE(vm, ObjNative, object);
+        break;
+    }
 
-        case OBJ_RESULT: {
-            FREE(vm, ObjResult, object);
+    case OBJ_STRING: {
+        ObjString *string = (ObjString *)object;
+        FREE_ARRAY(vm, char, string->chars, string->length + 1);
+        FREE(vm, ObjString, object);
+        break;
+    }
+
+    case OBJ_LIST: {
+        ObjList *list = (ObjList *)object;
+        freeValueArray(vm, &list->values);
+        FREE(vm, ObjList, list);
+        break;
+    }
+
+    case OBJ_DICT: {
+        ObjDict *dict = (ObjDict *)object;
+        FREE_ARRAY(vm, DictItem, dict->entries, dict->capacityMask + 1);
+        FREE(vm, ObjDict, dict);
+        break;
+    }
+
+    case OBJ_SET: {
+        ObjSet *set = (ObjSet *)object;
+        FREE_ARRAY(vm, SetItem, set->entries, set->capacityMask + 1);
+        FREE(vm, ObjSet, set);
+        break;
+    }
+
+    case OBJ_FILE: {
+        ObjFile *file = (ObjFile *)object;
+        if (file->asyncApi) {
+            // see files.c:gc_async_close_file
+            async_maybe_close_file(vm, file);
             break;
         }
+        FREE(vm, ObjFile, object);
+        break;
+    }
+    case OBJ_FUTURE: {
+        FREE(vm, ObjFuture, object);
+        break;
+    }
+
+    case OBJ_UPVALUE: {
+        FREE(vm, ObjUpvalue, object);
+        break;
+    }
+
+    case OBJ_ABSTRACT: {
+        ObjAbstract *abstract = (ObjAbstract *)object;
+        abstract->func(vm, abstract);
+        freeTable(vm, &abstract->values);
+        FREE(vm, ObjAbstract, object);
+        break;
+    }
+
+    case OBJ_RESULT: {
+        FREE(vm, ObjResult, object);
+        break;
+    }
     }
 }
 
 void collectGarbage(DictuVM *vm) {
-    if(vm->taskCount > 0)
+    if (vm->taskCount > 0)
         return;
 #ifdef DEBUG_TRACE_GC
     printf("-- gc begin\n");
@@ -331,10 +340,11 @@ void collectGarbage(DictuVM *vm) {
         grayValue(vm, *slot);
     }
 
-    
-    for (int i = 0; i < vm->asyncContextCount; i++) {
-        AsyncContext *ctx = vm->asyncContexts[i];
-        if (ctx->refCount > 0) {
+    if (vm->asyncContextCount > 0) {
+        ListNode *current = vm->asyncContexts->head;
+        while (current != NULL) {
+            AsyncContext *ctx = (AsyncContext *)current->data;
+             if (ctx->refCount > 0) {
             if (ctx->result)
                 grayObject(vm, (Obj *)ctx->result);
             for (Value *slot = ctx->stack; slot < ctx->stack + ctx->stackSize;
@@ -346,11 +356,18 @@ void collectGarbage(DictuVM *vm) {
                 grayObject(vm, (Obj *)upvalue);
             }
         }
+            current = current->next;
+        }
     }
-    for (int i = 0; i < vm->taskCount; i++) {
-        Task *t = vm->tasks[i];
-        if (t->waitFor)
-            grayObject(vm, (Obj *)t->waitFor);
+
+    if (vm->taskCount > 0) {
+        ListNode *current = vm->tasks->head;
+        while (current != NULL) {
+            Task *t = (Task *)current->data;
+            if (t->waitFor)
+                grayObject(vm, (Obj *)t->waitFor);
+            current = current->next;
+        }
     }
 
     for (int i = 0; i < vm->frameCount; i++) {
@@ -416,8 +433,7 @@ void collectGarbage(DictuVM *vm) {
 
 #ifdef DEBUG_TRACE_GC
     printf("-- gc collected %ld bytes (from %ld to %ld) next at %ld\n",
-           before - vm->bytesAllocated, before, vm->bytesAllocated,
-           vm->nextGC);
+           before - vm->bytesAllocated, before, vm->bytesAllocated, vm->nextGC);
 #endif
 }
 

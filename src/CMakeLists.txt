@@ -66,11 +66,22 @@ if(MSVC)
 else()
     set(CMAKE_C_FLAGS "-Wall -Wextra -Werror -Wshadow -Wunused-function -Wunused-macros")
 if(APPLE)
+
     # Comment Liz3: AppleClang deprecated sprintf and wants to use snprintf
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-deprecated-declarations")
 endif()
     set(CMAKE_C_FLAGS_DEBUG "-O0 -g")
     set(CMAKE_C_FLAGS_RELEASE "-O3 -flto")
+   #  set (CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -fno-omit-frame-pointer -fsanitize=address")
+   #  set (CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -fno-omit-frame-pointer -fsanitize=address")
+   # set(CMAKE_EXE_LINKER_FLAGS_DEBUG
+   #  "${CMAKE_EXE_LINKER_FLAGS_DDEBUG} -fsanitize=address" CACHE STRING
+   #  "Linker flags to be used to create executables for Asan build type." FORCE)
+
+set(CMAKE_SHARED_LINKER_FLAGS_DEBUG
+    "${CMAKE_SHARED_LINKER_FLAGS_DEBUG} -fsanitize=address" CACHE STRING
+    "Linker lags to be used to create shared libraries for Asan build type." FORCE)
+ 
 endif()
 
 if(CMAKE_BUILD_TYPE MATCHES Debug)

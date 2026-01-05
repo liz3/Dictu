@@ -26,6 +26,7 @@
 #include "datatypes/strings.h"
 #include "debug.h"
 #include "error_lib/error.h"
+#include "linked_list.h"
 #include "memory.h"
 #include "natives.h"
 #include "object.h"
@@ -102,13 +103,12 @@ void runtimeError(DictuVM *vm, const char *format, ...) {
 
 AsyncContext *createAsyncContext(DictuVM *vm) {
     if (vm->asyncContextCount == 0) {
-        vm->asyncContexts = ALLOCATE(vm, AsyncContext *, 1);
-    } else {
-        vm->asyncContexts =
-            GROW_ARRAY(vm, vm->asyncContexts, AsyncContext *,
-                       vm->asyncContextCount, vm->asyncContextCount + 1);
+        vm->asyncContexts = createList(vm);
     }
     AsyncContext *ctx = ALLOCATE(vm, AsyncContext, 1);
+
+    appendLinkedList(vm, vm->asyncContexts, ctx);
+
     ctx->frames = NULL;
     ctx->frameCount = 0;
     ctx->frameCapacity = 0;
@@ -118,7 +118,7 @@ AsyncContext *createAsyncContext(DictuVM *vm) {
     ctx->openUpvalues = NULL;
     ctx->ref = NULL;
     ctx->refCount = 0;
-    vm->asyncContexts[vm->asyncContextCount++] = ctx;
+    vm->asyncContextCount++;
     return ctx;
 }
 void releaseAsyncContext(DictuVM *vm, AsyncContext *ctx) {
@@ -134,43 +134,24 @@ void releaseAsyncContext(DictuVM *vm, AsyncContext *ctx) {
     FREE(vm, AsyncContext, ctx);
     if (vm->asyncContextCount == 1) {
         vm->asyncContextCount--;
-        FREE_ARRAY(vm, AsyncContext *, vm->asyncContexts, 1);
+        freeList(vm, vm->asyncContexts);
         vm->asyncContexts = NULL;
         return;
     } else {
-        bool f = false;
-        for (int i = 0; i < vm->asyncContextCount; i++) {
-            if (!f) {
-                if (vm->asyncContexts[i] == ctx) {
-                    f = true;
-                }
-            } else {
-                // shift all later one spot up
-                vm->asyncContexts[i - 1] = vm->asyncContexts[i];
-            }
-        }
         vm->asyncContextCount--;
-        vm->asyncContexts =
-            SHRINK_ARRAY(vm, vm->asyncContexts, AsyncContext *,
-                         vm->asyncContextCount + 1, vm->asyncContextCount);
+        removeListEntry(vm, vm->asyncContexts, ctx);
     }
 }
 void pushTask(DictuVM *vm, Task *ctx, bool prepend) {
     if (vm->taskCount == 0) {
-        vm->tasks = ALLOCATE(vm, Task *, 1);
-    } else {
-        vm->tasks =
-            GROW_ARRAY(vm, vm->tasks, Task *, vm->taskCount, vm->taskCount + 1);
+        vm->tasks = createList(vm);
     }
     if (prepend) {
-        for (int i = vm->taskCount - 1; i >= 0; i--) {
-            vm->tasks[i + 1] = vm->tasks[i];
-        }
-        vm->tasks[0] = ctx;
-        vm->taskCount++;
+        prependLinkedList(vm, vm->tasks, ctx);
     } else {
-        vm->tasks[vm->taskCount++] = ctx;
+        appendLinkedList(vm, vm->tasks, ctx);
     }
+    vm->taskCount += 1;
 }
 Task *createTask(DictuVM *vm, bool prepend) {
     Task *ctx = ALLOCATE(vm, Task, 1);
@@ -180,22 +161,10 @@ Task *createTask(DictuVM *vm, bool prepend) {
 }
 void releaseTask(DictuVM *vm, Task *ctx) {
     if (vm->taskCount == 1) {
-        FREE_ARRAY(vm, Task *, vm->tasks, 1);
+        freeList(vm, vm->tasks);
         vm->tasks = NULL;
     } else {
-        bool f = false;
-        for (int i = 0; i < vm->taskCount; i++) {
-            if (!f) {
-                if (vm->tasks[i] == ctx) {
-                    f = true;
-                }
-            } else {
-                // shift all later one spot up
-                vm->tasks[i - 1] = vm->tasks[i];
-            }
-        }
-        vm->tasks = SHRINK_ARRAY(vm, vm->tasks, Task *, vm->taskCount,
-                                 vm->taskCount - 1);
+        removeListEntry(vm, vm->tasks, ctx);
     }
     vm->taskCount--;
 }
@@ -206,8 +175,12 @@ void refAsyncContext(AsyncContext *ctx, bool ref) {
 Task *popTask(DictuVM *vm, bool back) {
     if (vm->taskCount == 0)
         return NULL;
-    Task *t = back ? vm->tasks[vm->taskCount - 1] : vm->tasks[0];
-    releaseTask(vm, t);
+    Task *t = back ? popBack(vm, vm->tasks) : popFront(vm, vm->tasks);
+    if (vm->taskCount == 1) {
+        freeList(vm, vm->tasks);
+        vm->tasks = NULL;
+    }
+    vm->taskCount -= 1;
     return t;
 }
 
@@ -1055,15 +1028,15 @@ static void setReplVar(DictuVM *vm, Value value) {
     tableSet(vm, &vm->globals, vm->replVar, value);
 }
 
-static DictuInterpretResult asyncFreezeState(DictuVM *vm,
-                                             AsyncContext *targetContext, uint8_t* ip) {
+static DictuInterpretResult
+asyncFreezeState(DictuVM *vm, AsyncContext *targetContext, uint8_t *ip) {
     Value target = peek(vm, 0);
 
     AsyncContext *ctx = targetContext;
     refAsyncContext(ctx, true);
     ctx->stackSize = (vm->stackTop - vm->stack);
-    memcpy(ctx->stack, vm->stack, sizeof(Value)* ctx->stackSize);
-    ctx->frames[ctx->frameCount-1].ip = ip;
+    memcpy(ctx->stack, vm->stack, sizeof(Value) * ctx->stackSize);
+    ctx->frames[ctx->frameCount - 1].ip = ip;
     ctx->frameCount = vm->frameCount;
     ctx->frameCapacity = vm->frameCapacity;
     ctx->openUpvalues = vm->openUpvalues;
@@ -2889,17 +2862,21 @@ void el_task_cb(uv_idle_t *handle) {
         uv_idle_stop(handle);
         uv_close((uv_handle_t *)handle, NULL);
         while (vm->asyncContextCount) {
-            vm->asyncContexts[0]->refCount = 0;
-            vm->asyncContexts[0]->ref = NULL;
-            releaseAsyncContext(vm, vm->asyncContexts[0]);
+            AsyncContext* ctx = vm->asyncContexts->head->data;
+            ctx->refCount = 0;
+            ctx->ref = NULL;
+            releaseAsyncContext(vm, ctx);
         }
         collectGarbage(vm);
 
         return;
     }
     bool hasImmidiateTasks = false;
-    for (int i = 0; i < vm->taskCount; i++) {
-        Task *task = vm->tasks[i];
+    ListNode *taskHead = vm->tasks != NULL ? vm->tasks->head : NULL;
+
+    while(taskHead != NULL) {
+        Task *task = taskHead->data;
+        taskHead = taskHead->next;
         if (task->asyncContext && task->waitFor && task->waitFor->pending)
             continue;
         hasImmidiateTasks = true;
@@ -2909,6 +2886,9 @@ void el_task_cb(uv_idle_t *handle) {
         msleep(1);
         return;
     }
+
+
+    
     Task *t = popTask(vm, true);
     DictuInterpretResult res = run_task(vm, t);
     FREE(vm, Task, t);

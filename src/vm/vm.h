@@ -5,6 +5,7 @@
 #include "object.h"
 #include "table.h"
 #include "value.h"
+#include "linked_list.h"
 #include <uv.h>
 
 // TODO: Work out the maximum stack size at compilation time
@@ -50,8 +51,8 @@ struct _vm {
     bool repl;
     CallFrame *frames;
     AsyncContext *asyncContextInScope;
-    AsyncContext **asyncContexts;
-    Task **tasks;
+    LinkedList *asyncContexts;
+    LinkedList *tasks;
     int taskCount;
     int asyncContextCount;
     int frameCount;

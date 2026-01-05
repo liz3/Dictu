@@ -25,4 +25,13 @@ if(LINUX AND CMAKE_C_COMPILER_ID STREQUAL "Clang")
     # Clang needs this otherwise ld will fail on linux since the lib is build with -flto
     set(CMAKE_C_FLAGS_RELEASE "-flto")
     set(CMAKE_C_FLAGS_DEBUG "-O0 -g")
+# set (CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -fno-omit-frame-pointer -fsanitize=address")
+#    set(CMAKE_EXE_LINKER_FLAGS_DEBUG
+#     "${CMAKE_EXE_LINKER_FLAGS_DDEBUG} -fsanitize=address" CACHE STRING
+#     "Linker flags to be used to create executables for Asan build type." FORCE)
+
+# set(CMAKE_SHARED_LINKER_FLAGS_DEBUG
+#     "${CMAKE_SHARED_LINKER_FLAGS_DEBUG} -fsanitize=address" CACHE STRING
+#     "Linker lags to be used to create shared libraries for Asan build type." FORCE)
+ 
 endif()
