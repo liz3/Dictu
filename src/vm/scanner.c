@@ -291,6 +291,8 @@ static LangTokenType identifierType(Scanner *scanner) {
                                     return checkKeyword(scanner, 3, 1, "e", TOKEN_TRUE);
                                 case 'a':
                                     return checkKeyword(scanner, 3, 2, "it", TOKEN_TRAIT);
+                                default:
+                                    break;
                             }
                         }
                 }
