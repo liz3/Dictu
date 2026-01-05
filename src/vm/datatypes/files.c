@@ -131,7 +131,7 @@ void async_on_read(uv_fs_t *req) {
             ObjString *result = copyString(
                 vm, fr->buffer,
                 fr->bufferLen == 1024 ? req->result
-                                      : fr->bufferLen - (1024 - req->result));
+                                      : (ssize_t)(fr->bufferLen - (1024 - req->result)));
             FREE_ARRAY(vm, char, fr->buffer, fr->bufferLen);
             fr->future->result = newResultSuccess(vm, OBJ_VAL(result));
             fr->future->pending = false;

@@ -7,6 +7,7 @@
 #include "../vm/vm.h"
 
 
+TaskTimer* createTaskTimer(DictuVM*vm, bool timeout);
 Value createFutureModule(DictuVM *vm);
 
 #endif //dictu_ffi_module_h

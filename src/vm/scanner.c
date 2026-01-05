@@ -250,9 +250,8 @@ static LangTokenType identifierType(Scanner *scanner) {
             return checkKeyword(scanner, 1, 6, "rivate", TOKEN_PRIVATE);
         case 'r':
             if (scanner->current - scanner->start > 1) {
-                switch (scanner->start[1]) {
-                    case 'e':
-                        return checkKeyword(scanner, 2, 4, "turn", TOKEN_RETURN);
+                if (scanner->start[1] == 'e') {
+                    return checkKeyword(scanner, 2, 4, "turn", TOKEN_RETURN);
                 }
             } else {
                 if (scanner->start[1] == '"' || scanner->start[1] == '\'') {

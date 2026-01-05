@@ -7,6 +7,12 @@ typedef struct {
 
 #define AS_TASK_TIMER(v) ((TaskTimerAbstract *)AS_ABSTRACT(v)->data)
 
+TaskTimer* createTaskTimer(DictuVM*vm, bool timeout) {
+    TaskTimer *timer = ALLOCATE(vm, TaskTimer, 1);
+    timer->timeout = timeout;
+    timer->runCount = 0;
+    return timer;
+}
 
 void freeTaskTimerAbstract(DictuVM *vm, ObjAbstract *abstract) {
     TaskTimerAbstract *timer = (TaskTimerAbstract *)abstract->data;
@@ -114,14 +120,13 @@ static Value createTimer(DictuVM *vm, int argCount, Value *args, bool timeout) {
     push(vm, OBJ_VAL(abstract));
     TaskTimerAbstract *tta = ALLOCATE(vm, TaskTimerAbstract, 1);
     tta->cancelled = false;
-    TaskTimer *timer = ALLOCATE(vm, TaskTimer, 1);
+    TaskTimer *timer = createTaskTimer(vm, timeout);
     uv_timer_t *handle = ALLOCATE(vm, uv_timer_t, 1);
     uv_timer_init(vm->uv_loop, handle);
     tta->timer = timer;
     AsyncContext *context = copyVmState(vm);
     timer->context = context;
-    timer->timeout = timeout;
-    timer->runCount = 0;
+
     vm->timerAmount++;
     context->breakFrame = context->frameCount;
     CallFrame *frame = &context->frames[context->frameCount++];
